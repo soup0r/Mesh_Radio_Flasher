@@ -9,14 +9,14 @@
 
 static const char *TAG = "WEB_UPLOAD";
 
-// Add this macro definition
 #ifndef MIN
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #endif
 
-#define PAGE_BUFFER_SIZE (16 * 1024)  // 16KB buffer for multiple pages
+#define PAGE_BUFFER_SIZE (16 * 1024)
 #define NRF52_PAGE_SIZE 4096
 
+// Type definitions
 typedef struct {
     bool in_progress;
     uint32_t total_bytes;
@@ -33,6 +33,41 @@ typedef struct {
 } upload_context_t;
 
 static upload_context_t *g_upload_ctx = NULL;
+
+// Forward declarations - ADD ALL OF THESE
+static esp_err_t flush_buffer(upload_context_t *ctx);
+static void hex_flash_callback(hex_record_t *record, uint32_t abs_addr, void *ctx);
+static esp_err_t upload_post_handler(httpd_req_t *req);
+static esp_err_t progress_handler(httpd_req_t *req);
+static esp_err_t check_and_reconnect_swd(void);
+esp_err_t disable_protection_handler(httpd_req_t *req);
+esp_err_t erase_all_handler(httpd_req_t *req);
+esp_err_t check_swd_handler(httpd_req_t *req);
+
+// Helper function for SWD reconnection
+static esp_err_t check_and_reconnect_swd(void) {
+    if (swd_is_connected()) {
+        return ESP_OK;
+    }
+    
+    ESP_LOGI(TAG, "Attempting SWD reconnection...");
+    
+    // Try to reconnect
+    esp_err_t ret = swd_connect();
+    if (ret != ESP_OK) {
+        // Try with reset
+        ret = swd_reset_target();
+        if (ret == ESP_OK) {
+            ret = swd_connect();
+        }
+    }
+    
+    if (ret == ESP_OK) {
+        ret = swd_flash_init();
+    }
+    
+    return ret;
+}
 
 // Flush buffer to flash
 static esp_err_t flush_buffer(upload_context_t *ctx) {
