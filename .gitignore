@@ -1,0 +1,34 @@
+# Build directories
+build/
+.pio/
+.pioenvs/
+.piolibdeps/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+*.map
+*.elf
+*.bin
+sdkconfig.old
+
+# IDE / Editor
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+*.code-workspace
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Logs
+*.log
+
+# Credentials (create your own wifi_credentials.h)
+**/wifi_credentials.h
+
+# OS clutter
+Thumbs.db
