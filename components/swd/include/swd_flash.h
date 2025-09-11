@@ -12,6 +12,15 @@
 #define NRF52_FLASH_PAGE_SIZE 4096U            // 4KB pages
 #define NRF52_FLASH_WORD_SIZE 4U
 
+#define CTRL_AP_RESET           0x00
+#define CTRL_AP_ERASEALL        0x04
+#define CTRL_AP_ERASEALLSTATUS  0x08
+#define CTRL_AP_APPROTECTSTATUS 0x0C
+#define CTRL_AP_IDR             0xFC
+
+// Nordic CTRL-AP IDR value from pyOCD
+#define NORDIC_CTRL_AP_IDR      0x12880000  // From pyOCD: AP_IDR_VALUE = 0x12880000
+
 // NVMC Registers (Non-Volatile Memory Controller)
 #define NVMC_BASE           0x4001E000U
 #define NVMC_READY         (NVMC_BASE + 0x400U)

@@ -137,14 +137,14 @@ static esp_err_t root_handler(httpd_req_t *req) {
     
     // Protection management section
     const char* protection_html = 
-        "<h2>Protection Management</h2>"
+        "<h2>Flash Operations</h2>"
         "<div class='section'>"
-        "<p class='warning'>⚠️ Warning: These operations will erase data!</p>"
-        "<button class='btn btn-danger' onclick='disableProtection()'>Disable APPROTECT</button>"
-        "<button class='btn btn-danger' onclick='eraseAll()'>Full Chip Erase</button>"
-        "<button class='btn' onclick='checkStatus()'>Refresh Status</button>"
-        "<button class='btn' onclick='checkSWD()'>Check SWD Connection</button>"
+        "<p class='warning'>⚠️ Warning: Mass erase will DELETE ALL DATA on the chip!</p>"
+        "<p>Mass erase is required to disable APPROTECT and allow flashing.</p>"
+        "<button class='btn btn-danger' onclick='massErase()'>Mass Erase & Disable APPROTECT</button>"
+        "<button class='btn' onclick='checkSWD()'>Check SWD Status</button>"
         "<div id='protStatus' style='margin-top:10px;'></div>"
+        "<div id='regDump' style='margin-top:10px;font-family:monospace;font-size:12px;'></div>"
         "</div>";
     
     httpd_resp_send_chunk(req, protection_html, strlen(protection_html));
@@ -180,6 +180,33 @@ static esp_err_t root_handler(httpd_req_t *req) {
     const char* script = 
         "<script>"
         "let progressTimer=null;"
+        "function massErase(){"
+        "if(!confirm('This will ERASE EVERYTHING on the chip and disable APPROTECT. Continue?'))return;"
+        "document.getElementById('protStatus').innerText='Performing mass erase...';"
+        "fetch('/mass_erase').then(r=>r.json()).then(data=>{"
+        "document.getElementById('protStatus').innerText=data.message;"
+        "setTimeout(checkSWD,2000);"
+        "});"
+        "}"
+        "function checkSWD(){"
+        "document.getElementById('protStatus').innerText='Checking SWD...';"
+        "fetch('/check_swd').then(r=>r.json()).then(data=>{"
+        "if(data.connected){"
+        "document.getElementById('protStatus').innerHTML='<b>SWD Connected</b>';"
+        "if(data.registers){"
+        "let html='<h4>Register Dump:</h4><table style=\"font-size:12px;\">';"
+        "for(let key in data.registers){"
+        "html+='<tr><td>'+key+':</td><td>'+data.registers[key]+'</td></tr>';"
+        "}"
+        "html+='</table>';"
+        "document.getElementById('regDump').innerHTML=html;"
+        "}"
+        "}else{"
+        "document.getElementById('protStatus').innerHTML='<b style=\"color:red;\">SWD Disconnected</b>';"
+        "document.getElementById('regDump').innerHTML='';"
+        "}"
+        "});"
+        "}"
         "function checkStatus(){"
         "location.reload();"
         "}"
@@ -245,7 +272,7 @@ static esp_err_t root_handler(httpd_req_t *req) {
 static esp_err_t start_webserver(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 12;  // Increased
+    config.max_uri_handlers = 12;
     config.recv_wait_timeout = 10;
     config.stack_size = 8192;
     
@@ -257,24 +284,9 @@ static esp_err_t start_webserver(void) {
             .user_ctx = NULL
         };
         
-        httpd_uri_t disable_prot_uri = {
-            .uri = "/disable_protection",
-            .method = HTTP_GET,
-            .handler = disable_protection_handler,
-            .user_ctx = NULL
-        };
-        
-        httpd_uri_t erase_all_uri = {
-            .uri = "/erase_all",
-            .method = HTTP_GET,
-            .handler = erase_all_handler,
-            .user_ctx = NULL
-        };
-        
         httpd_register_uri_handler(web_server, &root_uri);
-        httpd_register_uri_handler(web_server, &disable_prot_uri);
-        httpd_register_uri_handler(web_server, &erase_all_uri);
         
+        // This registers all the upload-related handlers including mass_erase
         register_upload_handlers(web_server);
         
         ESP_LOGI(TAG, "Web server started successfully");
@@ -567,7 +579,22 @@ static esp_err_t try_swd_connection(void) {
         xEventGroupClearBits(system_events, SWD_CONNECTED_BIT);
         ESP_LOGE(TAG, "✗ SWD connection failed with error: 0x%x", ret);
     }
-    
+
+    if (ret == ESP_OK) {
+    // Check APPROTECT status
+        uint32_t approtect;
+        if (swd_mem_read32(UICR_APPROTECT, &approtect) == ESP_OK) {
+            if (approtect == 0xFFFFFFFF) {
+                ESP_LOGW(TAG, "APPROTECT is in erased state (protected on nRF52840)");
+                ESP_LOGI(TAG, "Consider using 'Disable APPROTECT' before flashing");
+            } else if (approtect == 0xFFFFFF5A) {
+                ESP_LOGI(TAG, "APPROTECT is disabled (good for flashing)");
+            } else {
+                ESP_LOGW(TAG, "APPROTECT has unexpected value: 0x%08lX", approtect);
+            }
+        }
+    }
+
     ESP_LOGI(TAG, "=== SWD Connection Attempt Complete ===");
     return ret;
 }

@@ -53,4 +53,11 @@
 #define APPROTECT_ENABLED      0xFFFFFF00  // Protection enabled
 #define APPROTECT_DISABLED     0xFFFFFFFF  // Default erased value (still protected on nRF52840!)
 
+#define NRF52_AIRCR         0xE000ED0C  // Application Interrupt and Reset Control Register
+
+// CTRL-AP registers (AP1)
+#define CTRLAP_ERASE        0x04        // Erase control register
+#define CTRLAP_ERASEALL     0x01        // Mass erase command
+
+
 #endif // NRF52_HAL_H

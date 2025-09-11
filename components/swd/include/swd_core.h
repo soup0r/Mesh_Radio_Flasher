@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include "esp_err.h"
 
+
 // SWD Configuration
 typedef struct {
     int pin_swclk;
@@ -32,6 +33,7 @@ typedef enum {
 #define AP_CSW       0x00
 #define AP_TAR       0x04
 #define AP_DRW       0x0C
+#define AP_IDR       0xFC  // AP Identification Register
 
 // Initialize SWD interface
 esp_err_t swd_init(const swd_config_t *config);

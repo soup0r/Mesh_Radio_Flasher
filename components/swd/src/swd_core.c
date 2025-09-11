@@ -496,30 +496,37 @@ uint32_t swd_get_idcode(void) {
 
 // Power up debug domain
 esp_err_t swd_power_up(void) {
+    ESP_LOGI(TAG, "Powering up debug domain...");
+    
     // Clear any errors first
     swd_clear_errors();
     
     // Request debug and system power
     esp_err_t ret = swd_dp_write(DP_CTRL_STAT, 0x50000000);
     if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to request power");
         return ret;
     }
     
-    // Wait for power up acknowledgment
-    for (int i = 0; i < 100; i++) {
+    // Wait for power up acknowledgment with longer timeout
+    for (int i = 0; i < 200; i++) {  // Increased timeout
         uint32_t status = 0;
         ret = swd_dp_read(DP_CTRL_STAT, &status);
         if (ret != ESP_OK) {
-            return ret;
+            ESP_LOGW(TAG, "Failed to read CTRL_STAT during power-up");
+            // Don't return error, keep trying
         }
         
         // Check CSYSPWRUPACK and CDBGPWRUPACK
         if ((status & 0xA0000000) == 0xA0000000) {
             ESP_LOGI(TAG, "Debug powered up: status=0x%08lX", status);
+            
+            // Clear any sticky errors that might have occurred during power-up
+            swd_clear_errors();
             return ESP_OK;
         }
         
-        vTaskDelay(1);
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
     
     ESP_LOGE(TAG, "Power up timeout");
