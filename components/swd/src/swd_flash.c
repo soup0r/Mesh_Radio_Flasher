@@ -343,211 +343,8 @@ cleanup:
 
 // Mass erase
 esp_err_t swd_flash_mass_erase_ctrl_ap(void) {
-    ESP_LOGW(TAG, "=== Starting CTRL-AP Mass Erase (will nuke everything!) ===");
-    
-    esp_err_t ret;
-    uint32_t value;
-    
-    // Step 1: Find the CTRL-AP by scanning APs
-    ESP_LOGI(TAG, "Scanning for Nordic CTRL-AP...");
-    
-    int ctrl_ap_num = -1;
-    for (int ap = 0; ap < 256; ap++) {  // pyOCD scans up to 256 APs
-        // Select this AP
-        ret = swd_dp_write(DP_SELECT, (ap << 24));
-        if (ret != ESP_OK) {
-            continue;
-        }
-        
-        // Read IDR
-        ret = swd_ap_read(CTRL_AP_IDR, &value);
-        if (ret != ESP_OK) {
-            continue;
-        }
-        
-        ESP_LOGD(TAG, "AP[%d] IDR = 0x%08lX", ap, value);
-        
-        // Check if this matches Nordic CTRL-AP
-        // pyOCD checks: (idr & IDR_CLASS_MASK) == AP_CLASS_MEM_AP
-        // For Nordic: IDR should be 0x12880000
-        if (value == NORDIC_CTRL_AP_IDR || (value & 0xFFF00000) == 0x12800000) {
-            ESP_LOGI(TAG, "Found Nordic CTRL-AP at AP index %d (IDR=0x%08lX)", ap, value);
-            ctrl_ap_num = ap;
-            break;
-        }
-    }
-    
-    if (ctrl_ap_num < 0) {
-        ESP_LOGE(TAG, "Nordic CTRL-AP not found! Cannot perform mass erase.");
-        
-        // Let's try common locations anyway
-        ESP_LOGI(TAG, "Trying common CTRL-AP locations (1, 2)...");
-        ctrl_ap_num = 1;  // Try AP#1 first
-    }
-    
-    // Select the CTRL-AP
-    ESP_LOGI(TAG, "Selecting CTRL-AP at index %d...", ctrl_ap_num);
-    ret = swd_dp_write(DP_SELECT, (ctrl_ap_num << 24));
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to select CTRL-AP");
-        return ret;
-    }
-    
-    // Step 2: Check if device is already unlocked
-    ESP_LOGI(TAG, "Reading APPROTECTSTATUS...");
-    ret = swd_ap_read(CTRL_AP_APPROTECTSTATUS, &value);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read APPROTECTSTATUS: %s", esp_err_to_name(ret));
-        // Continue anyway
-    } else {
-        ESP_LOGI(TAG, "APPROTECTSTATUS = 0x%08lX (%s)", value,
-                value == 0 ? "LOCKED" : "UNLOCKED");
-    }
-    
-    // Step 3: Assert reset before erase (pyOCD does this)
-    ESP_LOGI(TAG, "Asserting system reset...");
-    ret = swd_ap_write(CTRL_AP_RESET, 1);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to assert reset: %s", esp_err_to_name(ret));
-    }
-    vTaskDelay(pdMS_TO_TICKS(10));
-    
-    // Step 4: Start ERASEALL
-    ESP_LOGW(TAG, "*** TRIGGERING ERASEALL - THIS WILL ERASE EVERYTHING! ***");
-    ret = swd_ap_write(CTRL_AP_ERASEALL, 1);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to trigger ERASEALL: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    
-    ESP_LOGI(TAG, "ERASEALL triggered, waiting for completion...");
-    
-    // Step 5: Poll ERASEALLSTATUS until done
-    uint32_t timeout_ms = 5000;  // 5 seconds (pyOCD uses longer timeout)
-    uint32_t elapsed_ms = 0;
-    uint32_t last_status = 0xFFFFFFFF;
-    
-    while (elapsed_ms < timeout_ms) {
-        ret = swd_ap_read(CTRL_AP_ERASEALLSTATUS, &value);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to read ERASEALLSTATUS, retrying...");
-            vTaskDelay(pdMS_TO_TICKS(50));
-            elapsed_ms += 50;
-            continue;
-        }
-        
-        if (value != last_status) {
-            ESP_LOGI(TAG, "ERASEALLSTATUS = 0x%08lX", value);
-            last_status = value;
-        }
-        
-        // pyOCD checks: value == CTRL.ERASEALLSTATUS.IDLE (which is 0)
-        if (value == 0) {
-            ESP_LOGI(TAG, "✓ Mass erase complete after %lu ms!", elapsed_ms);
-            break;
-        }
-        
-        if (elapsed_ms % 500 == 0) {
-            ESP_LOGI(TAG, "  Still erasing... (%lu ms elapsed, status=0x%08lX)", 
-                    elapsed_ms, value);
-        }
-        
-        vTaskDelay(pdMS_TO_TICKS(50));
-        elapsed_ms += 50;
-    }
-    
-    if (elapsed_ms >= timeout_ms) {
-        ESP_LOGE(TAG, "✗ Mass erase timeout after %lu ms!", timeout_ms);
-        return ESP_ERR_TIMEOUT;
-    }
-    
-    // Step 6: Release reset
-    ESP_LOGI(TAG, "Releasing system reset...");
-    ret = swd_ap_write(CTRL_AP_RESET, 0);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to release reset: %s", esp_err_to_name(ret));
-    }
-    
-    vTaskDelay(pdMS_TO_TICKS(100));
-    
-    // Step 7: Verify APPROTECT is now unlocked
-    ESP_LOGI(TAG, "Verifying unlock status...");
-    ret = swd_ap_read(CTRL_AP_APPROTECTSTATUS, &value);
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Final APPROTECTSTATUS = 0x%08lX (%s)", value,
-                value == 0 ? "STILL LOCKED!" : "UNLOCKED");
-        
-        if (value == 0) {
-            ESP_LOGE(TAG, "✗ Device is still locked after mass erase!");
-            return ESP_FAIL;
-        }
-    }
-    
-    // Step 8: Switch back to MEM-AP (AP#0)
-    ESP_LOGI(TAG, "Switching back to MEM-AP (AP#0)...");
-    ret = swd_dp_write(DP_SELECT, 0);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to select MEM-AP");
-        return ret;
-    }
-    
-    // Step 9: Power cycle the debug interface (pyOCD does this)
-    ESP_LOGI(TAG, "Power cycling debug interface...");
-    
-    // Clear sticky errors
-    swd_clear_errors();
-    
-    // Reconnect to target
-    ESP_LOGI(TAG, "Reconnecting to target...");
-    ret = swd_connect();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to reconnect: %s", esp_err_to_name(ret));
-        
-        // Try harder reset sequence
-        ESP_LOGI(TAG, "Trying harder reset...");
-        swd_reset_target();
-        vTaskDelay(pdMS_TO_TICKS(500));
-        ret = swd_connect();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Still can't reconnect!");
-            return ret;
-        }
-    }
-    
-    // Reinit flash
-    ret = swd_flash_init();
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Flash init failed: %s", esp_err_to_name(ret));
-    }
-    
-    // Step 10: Verify everything is erased
-    ESP_LOGI(TAG, "Verifying erase...");
-    
-    uint32_t test_addr[] = {0x00000000, 0x00001000, 0x000F4000};
-    for (int i = 0; i < 3; i++) {
-        uint32_t val;
-        ret = swd_mem_read32(test_addr[i], &val);
-        if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "Flash[0x%08lX] = 0x%08lX %s", 
-                    test_addr[i], val,
-                    val == 0xFFFFFFFF ? "✓" : "✗ NOT ERASED!");
-        }
-    }
-    
-    // Check UICR
-    uint32_t uicr_approtect;
-    ret = swd_mem_read32(UICR_APPROTECT, &uicr_approtect);
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "UICR_APPROTECT = 0x%08lX %s", 
-                uicr_approtect,
-                uicr_approtect == 0xFFFFFFFF ? "(erased)" : "(has value)");
-    }
-    
-    ESP_LOGW(TAG, "=== Mass Erase Complete ===");
-    ESP_LOGW(TAG, "All flash and UICR have been erased!");
-    ESP_LOGW(TAG, "You'll need to reprogram everything including bootloader.");
-    
-    return ESP_OK;
+    // Just call the main implementation
+    return swd_flash_disable_approtect();
 }
 
 // High-level firmware update
@@ -628,145 +425,242 @@ esp_err_t swd_flash_init(void) {
 }
 
 esp_err_t swd_flash_disable_approtect(void) {
-    ESP_LOGW(TAG, "=== Using CTRL-AP for chip erase and APPROTECT disable ===");
+    ESP_LOGW(TAG, "=== Starting CTRL-AP Mass Erase (WILL ERASE EVERYTHING!) ===");
     
     esp_err_t ret;
     uint32_t value;
     
-    // Step 1: Select AP#1 (CTRL-AP) - AP index 1
-    ESP_LOGI(TAG, "Selecting CTRL-AP (AP#1)...");
-    ret = swd_dp_write(DP_SELECT, (1 << 24));  // Select AP#1
+    // Step 1: Find the CTRL-AP by scanning APs
+    ESP_LOGI(TAG, "Scanning for Nordic CTRL-AP...");
+    
+    int ctrl_ap_num = -1;
+    for (int ap = 0; ap < 16; ap++) {  // Nordic typically uses AP#1 or AP#2
+        // Select this AP
+        ret = swd_dp_write(DP_SELECT, (ap << 24));
+        if (ret != ESP_OK) {
+            continue;
+        }
+        
+        // Read IDR
+        ret = swd_ap_read(AP_IDR, &value);
+        if (ret != ESP_OK) {
+            continue;
+        }
+        
+        ESP_LOGD(TAG, "AP[%d] IDR = 0x%08lX", ap, value);
+        
+        // Nordic CTRL-AP should have IDR 0x02880000 or 0x12880000
+        // But sometimes the upper bits vary, so check for the pattern
+        if ((value & 0x0FFF0000) == 0x02880000 || 
+            (value & 0x0FFF0000) == 0x12880000) {
+            ESP_LOGI(TAG, "Found Nordic CTRL-AP at AP index %d (IDR=0x%08lX)", ap, value);
+            ctrl_ap_num = ap;
+            break;
+        }
+    }
+    
+    // If not found by IDR, try common locations (AP#1 is typical for nRF52)
+    if (ctrl_ap_num < 0) {
+        ESP_LOGW(TAG, "CTRL-AP not found by IDR, trying AP#1 (common for nRF52)");
+        ctrl_ap_num = 1;
+    }
+    
+    // Select the CTRL-AP
+    ESP_LOGI(TAG, "Using CTRL-AP at index %d", ctrl_ap_num);
+    ret = swd_dp_write(DP_SELECT, (ctrl_ap_num << 24));
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to select CTRL-AP");
         return ret;
     }
     
-    // Verify we have the right AP by reading its IDR
-    ret = swd_ap_read(AP_IDR, &value);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read CTRL-AP IDR");
-        return ret;
-    }
-    
-    ESP_LOGI(TAG, "CTRL-AP IDR: 0x%08lX (expected 0x02880000)", value);
-    if ((value & 0xFFFFFF00) != NORDIC_CTRL_AP_IDR) {
-        ESP_LOGW(TAG, "Warning: CTRL-AP IDR mismatch, continuing anyway...");
-    }
-    
-    // Step 2: Check current APPROTECT status
+    // Step 2: Read current protection status (but don't trust it!)
+    ESP_LOGI(TAG, "Reading APPROTECTSTATUS...");
     ret = swd_ap_read(CTRL_AP_APPROTECTSTATUS, &value);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "APPROTECTSTATUS = 0x%08lX (%s)", value,
+                value == 0 ? "Shows as LOCKED" : "Shows as UNLOCKED");
+    }
+    
+    // Step 3: ALWAYS perform the erase, regardless of status!
+    ESP_LOGW(TAG, "*** PERFORMING FULL CHIP ERASE ***");
+    ESP_LOGW(TAG, "This will erase EVERYTHING including bootloader and SoftDevice!");
+    
+    // Assert reset during erase (some versions need this)
+    ESP_LOGI(TAG, "Asserting system reset...");
+    ret = swd_ap_write(CTRL_AP_RESET, 1);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read APPROTECTSTATUS");
-        return ret;
+        ESP_LOGW(TAG, "Failed to assert reset, continuing anyway");
     }
+    vTaskDelay(pdMS_TO_TICKS(10));
     
-    ESP_LOGI(TAG, "Current APPROTECTSTATUS: 0x%08lX (%s)", value,
-            value == 0 ? "LOCKED" : "UNLOCKED");
-    
-    if (value == 1) {
-        ESP_LOGI(TAG, "Device already unlocked!");
-        // Switch back to MEM-AP (AP#0)
-        swd_dp_write(DP_SELECT, 0);
-        return ESP_OK;
-    }
-    
-    // Step 3: Trigger ERASEALL through CTRL-AP
-    ESP_LOGW(TAG, "Triggering CTRL-AP ERASEALL (this will erase entire chip)...");
+    // Step 4: Trigger ERASEALL - THIS IS THE KEY OPERATION
+    ESP_LOGI(TAG, "Writing to ERASEALL register...");
     ret = swd_ap_write(CTRL_AP_ERASEALL, 1);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to trigger ERASEALL");
-        return ret;
+        ESP_LOGE(TAG, "Failed to write ERASEALL register!");
+        
+        // Try alternative approach: write 0x00000001 to offset 0x04
+        ESP_LOGI(TAG, "Trying alternative ERASEALL trigger...");
+        ret = swd_ap_write(0x04, 0x00000001);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Alternative ERASEALL also failed!");
+            return ret;
+        }
     }
     
-    // Step 4: Poll ERASEALLSTATUS until complete
-    ESP_LOGI(TAG, "Waiting for erase to complete...");
-    uint32_t timeout_ms = 1000;  // 1 second timeout
+    ESP_LOGI(TAG, "ERASEALL triggered, waiting for completion...");
+    ESP_LOGI(TAG, "This can take 20-90 seconds for a full chip erase!");
+    
+    // Step 5: Poll ERASEALLSTATUS with longer timeout for full erase
+    uint32_t timeout_ms = 120000;  // 2 minutes (full erase can be slow)
     uint32_t elapsed_ms = 0;
+    uint32_t poll_interval = 100;  // Check every 100ms
+    uint32_t last_status = 0xFFFFFFFF;
+    int unchanged_count = 0;
     
     while (elapsed_ms < timeout_ms) {
         ret = swd_ap_read(CTRL_AP_ERASEALLSTATUS, &value);
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to read ERASEALLSTATUS");
-            return ret;
+            ESP_LOGW(TAG, "Failed to read ERASEALLSTATUS, retrying...");
+            vTaskDelay(pdMS_TO_TICKS(poll_interval));
+            elapsed_ms += poll_interval;
+            continue;
         }
         
+        if (value != last_status) {
+            ESP_LOGI(TAG, "[%lu ms] ERASEALLSTATUS = 0x%08lX", elapsed_ms, value);
+            last_status = value;
+            unchanged_count = 0;
+        } else {
+            unchanged_count++;
+        }
+        
+        // Status = 0 means erase complete
         if (value == 0) {
-            ESP_LOGI(TAG, "✓ Erase complete after %lu ms", elapsed_ms);
+            ESP_LOGI(TAG, "✓ ERASEALL complete after %lu ms!", elapsed_ms);
             break;
         }
         
-        if (elapsed_ms % 100 == 0) {
-            ESP_LOGI(TAG, "  Erasing... (status=0x%08lX)", value);
+        // If status hasn't changed for a while, show progress
+        if (unchanged_count >= 50) {  // 5 seconds of no change
+            ESP_LOGI(TAG, "  Still erasing... %lu seconds elapsed", elapsed_ms / 1000);
+            unchanged_count = 0;
         }
         
-        vTaskDelay(pdMS_TO_TICKS(10));
-        elapsed_ms += 10;
+        vTaskDelay(pdMS_TO_TICKS(poll_interval));
+        elapsed_ms += poll_interval;
     }
     
     if (elapsed_ms >= timeout_ms) {
-        ESP_LOGE(TAG, "Erase timeout!");
+        ESP_LOGE(TAG, "✗ Erase timeout after %lu ms!", timeout_ms);
+        ESP_LOGE(TAG, "Last status was: 0x%08lX", value);
         return ESP_ERR_TIMEOUT;
     }
     
-    // Step 5: Issue reset through CTRL-AP
-    ESP_LOGI(TAG, "Issuing reset through CTRL-AP...");
-    
-    // Assert reset
-    ret = swd_ap_write(CTRL_AP_RESET, 1);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to assert reset");
-    }
-    
-    vTaskDelay(pdMS_TO_TICKS(10));
-    
-    // Release reset
+    // Step 6: Release reset
+    ESP_LOGI(TAG, "Releasing system reset...");
     ret = swd_ap_write(CTRL_AP_RESET, 0);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to release reset");
     }
     
+    // Give the chip time to come out of reset
+    vTaskDelay(pdMS_TO_TICKS(500));
+    
+    // Step 7: Power cycle the debug interface
+    ESP_LOGI(TAG, "Power cycling debug interface...");
+    
+    // Disconnect and reconnect
+    swd_disconnect();
     vTaskDelay(pdMS_TO_TICKS(100));
     
-    // Step 6: Verify unlock status
-    ret = swd_ap_read(CTRL_AP_APPROTECTSTATUS, &value);
+    // Clear errors and reconnect
+    swd_clear_errors();
+    
+    ESP_LOGI(TAG, "Reconnecting to target...");
+    ret = swd_connect();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read final APPROTECTSTATUS");
-    } else {
-        ESP_LOGI(TAG, "Final APPROTECTSTATUS: 0x%08lX (%s)", value,
-                value == 0 ? "LOCKED" : "UNLOCKED");
+        ESP_LOGE(TAG, "Failed to reconnect after erase");
         
-        if (value != 1) {
-            ESP_LOGE(TAG, "✗ Device still locked after ERASEALL!");
-            return ESP_FAIL;
+        // Try a hard reset
+        ESP_LOGI(TAG, "Attempting hard reset sequence...");
+        swd_reset_target();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        ret = swd_connect();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Still can't reconnect - chip may need power cycle");
+            return ret;
         }
     }
     
-    // Step 7: Switch back to MEM-AP (AP#0) for normal operations
-    ESP_LOGI(TAG, "Switching back to MEM-AP (AP#0)...");
+    // Step 8: Switch back to MEM-AP (AP#0)
+    ESP_LOGI(TAG, "Switching back to MEM-AP...");
     ret = swd_dp_write(DP_SELECT, 0);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to select MEM-AP");
         return ret;
     }
     
-    // Step 8: Reconnect and verify
-    ESP_LOGI(TAG, "Reconnecting to target...");
-    ret = swd_connect();
+    // Reinitialize memory and flash interfaces
+    ret = swd_mem_init();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to reconnect after unlock");
-        return ret;
+        ESP_LOGW(TAG, "Memory init failed: %s", esp_err_to_name(ret));
     }
     
-    // Re-initialize flash interface
     ret = swd_flash_init();
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Flash init failed after unlock");
+        ESP_LOGW(TAG, "Flash init failed: %s", esp_err_to_name(ret));
     }
     
-    ESP_LOGI(TAG, "✓ Device unlocked and ready for programming!");
-    ESP_LOGI(TAG, "Note: All flash and UICR have been erased.");
+    // Step 9: Verify the erase worked
+    ESP_LOGI(TAG, "=== Verifying Full Chip Erase ===");
     
-    return ESP_OK;
+    // Check various memory locations
+    uint32_t test_locations[] = {
+        0x00000000,  // Start of flash (reset vector)
+        0x00001000,  // MBR/Bootloader area  
+        0x00010000,  // Application area
+        0x000F4000,  // Bootloader location
+        0x10001000 + 0x208  // UICR APPROTECT
+    };
+    
+    const char *location_names[] = {
+        "Flash Start",
+        "MBR/Bootloader",
+        "Application",
+        "Bootloader",
+        "UICR_APPROTECT"
+    };
+    
+    bool all_erased = true;
+    for (int i = 0; i < 5; i++) {
+        uint32_t val;
+        ret = swd_mem_read32(test_locations[i], &val);
+        if (ret == ESP_OK) {
+            bool erased = (val == 0xFFFFFFFF);
+            ESP_LOGI(TAG, "%s [0x%08lX] = 0x%08lX %s", 
+                    location_names[i], test_locations[i], val,
+                    erased ? "✓ ERASED" : "✗ NOT ERASED!");
+            if (!erased) {
+                all_erased = false;
+            }
+        } else {
+            ESP_LOGE(TAG, "Failed to read %s [0x%08lX]", 
+                    location_names[i], test_locations[i]);
+        }
+    }
+    
+    if (all_erased) {
+        ESP_LOGW(TAG, "=== SUCCESS: Full Chip Erase Complete ===");
+        ESP_LOGW(TAG, "All flash memory has been erased!");
+        ESP_LOGW(TAG, "APPROTECT has been disabled!");
+        ESP_LOGW(TAG, "Device is ready for programming.");
+    } else {
+        ESP_LOGE(TAG, "=== WARNING: Some areas may not be fully erased ===");
+        ESP_LOGE(TAG, "Try power cycling the device and running erase again.");
+    }
+    
+    return all_erased ? ESP_OK : ESP_FAIL;
 }
 
 // Full chip erase (except UICR)
