@@ -4,8 +4,8 @@
 #include <stdint.h>
 
 // Memory map
-#define NRF52_FLASH_BASE    0x00000000
-#define NRF52_FLASH_SIZE    (1024 * 1024)  // 1MB
+//#define NRF52_FLASH_BASE    0x00000000
+//#define NRF52_FLASH_SIZE    (1024 * 1024)  // 1MB
 #define NRF52_SRAM_BASE     0x20000000
 #define NRF52_SRAM_SIZE     (256 * 1024)   // 256KB
 

@@ -536,7 +536,7 @@ static esp_err_t try_swd_connection(void) {
             .pin_swclk = 8,
             .pin_swdio = 9,
             .pin_reset = 7,
-            .delay_cycles = 2
+            .delay_cycles = 0
         };
         
         esp_err_t ret = swd_init(&swd_cfg);

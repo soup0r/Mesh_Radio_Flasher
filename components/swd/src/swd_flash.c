@@ -68,8 +68,8 @@ static esp_err_t set_nvmc_config(uint32_t mode) {
 
 // Erase a single page
 esp_err_t swd_flash_erase_page(uint32_t addr) {
-    // Validate address
-    if (addr >= NRF52_FLASH_SIZE) {
+    // New (correct) - UICR is at 0x10001000 and is valid
+    if (addr >= NRF52_FLASH_SIZE && addr != 0x10001000) {
         ESP_LOGE(TAG, "Address 0x%08lX out of range", addr);
         return ESP_ERR_INVALID_ARG;
     }
@@ -190,55 +190,22 @@ cleanup:
     return ret;
 }
 
-// Write a single word - optimized version
+// Optimized single word write
 esp_err_t swd_flash_write_word(uint32_t addr, uint32_t data) {
-    // Validate alignment
     if (addr & 0x3) {
         return ESP_ERR_INVALID_ARG;
     }
     
-    // Enable write mode once at the beginning
     esp_err_t ret = set_nvmc_config(NVMC_CONFIG_WEN);
     if (ret != ESP_OK) return ret;
     
-    // Write the word
     ret = swd_mem_write32(addr, data);
-    if (ret != ESP_OK) goto cleanup;
     
-    // Wait for write completion - nRF52 word write is typically 41us
-    // Poll for ready instead of fixed delay
-    uint32_t timeout = 50; // 50ms is way more than needed
-    uint32_t elapsed = 0;
-    
-    while (elapsed < timeout) {
-        uint32_t ready;
-        ret = swd_mem_read32(NVMC_READY, &ready);
-        if (ret != ESP_OK) goto cleanup;
-        
-        if (ready & 0x1) {
-            // Write complete
-            break;
-        }
-        
-        vTaskDelay(pdMS_TO_TICKS(1));
-        elapsed++;
-    }
-    
-    if (elapsed >= timeout) {
-        ESP_LOGE(TAG, "Write timeout at 0x%08lX", addr);
-        ret = ESP_ERR_TIMEOUT;
-        goto cleanup;
-    }
-    
-    // Skip verification for each word - do it at buffer level instead
-    
-cleanup:
-    // Return to read-only mode
     set_nvmc_config(NVMC_CONFIG_REN);
     return ret;
 }
 
-// Optimized buffer write
+// Fast flash write with proper alignment handling
 esp_err_t swd_flash_write_buffer(uint32_t addr, const uint8_t *data, uint32_t size, 
                                  flash_progress_cb progress) {
     if (!data || size == 0) {
@@ -246,12 +213,18 @@ esp_err_t swd_flash_write_buffer(uint32_t addr, const uint8_t *data, uint32_t si
     }
     
     ESP_LOGI(TAG, "Writing %lu bytes to 0x%08lX", size, addr);
+    uint32_t start_tick = xTaskGetTickCount();
     
-    // Enable write mode once for the entire buffer
-    esp_err_t ret = set_nvmc_config(NVMC_CONFIG_WEN);
-    if (ret != ESP_OK) return ret;
-    
+    esp_err_t ret;
     uint32_t written = 0;
+    
+    // Enable write mode
+    ret = swd_mem_write32(NVMC_CONFIG, NVMC_CONFIG_WEN);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enable write mode");
+        return ret;
+    }
+    vTaskDelay(1);
     
     // Handle unaligned start
     if (addr & 0x3) {
@@ -259,25 +232,16 @@ esp_err_t swd_flash_write_buffer(uint32_t addr, const uint8_t *data, uint32_t si
         uint32_t offset = addr & 0x3;
         uint32_t word;
         
-        // Read existing word
         ret = swd_mem_read32(aligned_addr, &word);
         if (ret != ESP_OK) goto cleanup;
         
-        // Modify bytes
         uint8_t *word_bytes = (uint8_t*)&word;
         uint32_t bytes_to_copy = 4 - offset;
         if (bytes_to_copy > size) bytes_to_copy = size;
         
-        for (uint32_t i = 0; i < bytes_to_copy; i++) {
-            word_bytes[offset + i] = data[i];
-        }
+        memcpy(&word_bytes[offset], data, bytes_to_copy);
         
-        // Write back
         ret = swd_mem_write32(aligned_addr, word);
-        if (ret != ESP_OK) goto cleanup;
-        
-        // Wait for this write to complete
-        ret = wait_nvmc_ready(50);
         if (ret != ESP_OK) goto cleanup;
         
         addr += bytes_to_copy;
@@ -286,47 +250,68 @@ esp_err_t swd_flash_write_buffer(uint32_t addr, const uint8_t *data, uint32_t si
         size -= bytes_to_copy;
     }
     
-    // Write aligned words in batches
+    // Allocate aligned buffer for word writes
+    // This ensures we have properly aligned data for swd_mem_write_block32
+    uint32_t max_words = 1024;  // Write up to 4KB at a time
+    uint32_t *word_buffer = malloc(max_words * sizeof(uint32_t));
+    if (!word_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate write buffer");
+        ret = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
+    
+    // Write aligned words in chunks
     while (size >= 4) {
-        uint32_t word = *(uint32_t*)data;
-        
-        // Write word
-        ret = swd_mem_write32(addr, word);
-        if (ret != ESP_OK) goto cleanup;
-        
-        // Only wait every 256 bytes or so for better performance
-        if ((written & 0xFF) == 0xFC || size == 4) {
-            ret = wait_nvmc_ready(50);
-            if (ret != ESP_OK) goto cleanup;
+        // Determine chunk size (up to max_words)
+        uint32_t words_in_chunk = size / 4;
+        if (words_in_chunk > max_words) {
+            words_in_chunk = max_words;
         }
         
-        addr += 4;
-        data += 4;
-        written += 4;
-        size -= 4;
+        // Copy data to aligned word buffer
+        memcpy(word_buffer, data, words_in_chunk * 4);
         
-        // Report progress every 1KB
-        if (progress && (written & 0x3FF) == 0) {
+        // This is the key optimization - writes many words in one transaction
+        ret = swd_mem_write_block32(addr, word_buffer, words_in_chunk);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Block write failed at 0x%08lX", addr);
+            free(word_buffer);
+            goto cleanup;
+        }
+        
+        uint32_t bytes_written = words_in_chunk * 4;
+        addr += bytes_written;
+        data += bytes_written;
+        written += bytes_written;
+        size -= bytes_written;
+        
+        // Report progress
+        if (progress && (written & 0xFFF) == 0) {  // Every 4KB
             progress(written, written + size, "Writing");
         }
     }
     
-    // Handle remaining bytes
+    free(word_buffer);
+    
+    // Handle remaining bytes (less than a word)
     if (size > 0) {
         uint32_t word = 0xFFFFFFFF;
-        uint8_t *word_bytes = (uint8_t*)&word;
-        
-        for (uint32_t i = 0; i < size; i++) {
-            word_bytes[i] = data[i];
-        }
+        memcpy(&word, data, size);
         
         ret = swd_mem_write32(addr, word);
         if (ret != ESP_OK) goto cleanup;
         
-        ret = wait_nvmc_ready(50);
-        if (ret != ESP_OK) goto cleanup;
-        
         written += size;
+    }
+    
+    // Wait for final write to complete
+    uint32_t timeout = 100;
+    while (timeout--) {
+        uint32_t ready;
+        ret = swd_mem_read32(NVMC_READY, &ready);
+        if (ret != ESP_OK) break;
+        if (ready & 0x1) break;
+        vTaskDelay(1);
     }
     
     if (progress) {
@@ -334,10 +319,14 @@ esp_err_t swd_flash_write_buffer(uint32_t addr, const uint8_t *data, uint32_t si
     }
     
 cleanup:
-    // Return to read-only mode
-    set_nvmc_config(NVMC_CONFIG_REN);
+    // Return to read mode
+    swd_mem_write32(NVMC_CONFIG, NVMC_CONFIG_REN);
     
-    ESP_LOGI(TAG, "Write complete: %lu bytes", written);
+    uint32_t elapsed_ms = (xTaskGetTickCount() - start_tick) * portTICK_PERIOD_MS;
+    float speed_kbps = elapsed_ms > 0 ? (float)(written * 1000) / (elapsed_ms * 1024) : 0;
+    ESP_LOGI(TAG, "Write complete: %lu bytes in %lu ms (%.1f KB/s)", 
+            written, elapsed_ms, speed_kbps);
+    
     return ret;
 }
 
@@ -425,242 +414,175 @@ esp_err_t swd_flash_init(void) {
 }
 
 esp_err_t swd_flash_disable_approtect(void) {
-    ESP_LOGW(TAG, "=== Starting CTRL-AP Mass Erase (WILL ERASE EVERYTHING!) ===");
+    ESP_LOGW(TAG, "=== Starting CTRL-AP Mass Erase ===");
+    
+    if (!swd_is_connected()) {
+        ESP_LOGE(TAG, "SWD not connected!");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    ESP_LOGI(TAG, "Checking connection...");
+    swd_clear_errors();
+    
+    uint32_t idcode = swd_get_idcode();
+    if (idcode == 0 || idcode == 0xFFFFFFFF) {
+        ESP_LOGE(TAG, "Invalid IDCODE: 0x%08lX", idcode);
+        return ESP_ERR_INVALID_STATE;
+    }
+    ESP_LOGI(TAG, "DP IDCODE: 0x%08lX", idcode);
     
     esp_err_t ret;
     uint32_t value;
     
-    // Step 1: Find the CTRL-AP by scanning APs
-    ESP_LOGI(TAG, "Scanning for Nordic CTRL-AP...");
-    
-    int ctrl_ap_num = -1;
-    for (int ap = 0; ap < 16; ap++) {  // Nordic typically uses AP#1 or AP#2
-        // Select this AP
-        ret = swd_dp_write(DP_SELECT, (ap << 24));
-        if (ret != ESP_OK) {
-            continue;
-        }
-        
-        // Read IDR
-        ret = swd_ap_read(AP_IDR, &value);
-        if (ret != ESP_OK) {
-            continue;
-        }
-        
-        ESP_LOGD(TAG, "AP[%d] IDR = 0x%08lX", ap, value);
-        
-        // Nordic CTRL-AP should have IDR 0x02880000 or 0x12880000
-        // But sometimes the upper bits vary, so check for the pattern
-        if ((value & 0x0FFF0000) == 0x02880000 || 
-            (value & 0x0FFF0000) == 0x12880000) {
-            ESP_LOGI(TAG, "Found Nordic CTRL-AP at AP index %d (IDR=0x%08lX)", ap, value);
-            ctrl_ap_num = ap;
-            break;
-        }
-    }
-    
-    // If not found by IDR, try common locations (AP#1 is typical for nRF52)
-    if (ctrl_ap_num < 0) {
-        ESP_LOGW(TAG, "CTRL-AP not found by IDR, trying AP#1 (common for nRF52)");
-        ctrl_ap_num = 1;
-    }
-    
-    // Select the CTRL-AP
-    ESP_LOGI(TAG, "Using CTRL-AP at index %d", ctrl_ap_num);
-    ret = swd_dp_write(DP_SELECT, (ctrl_ap_num << 24));
+    // Step 1: Power up debug
+    ESP_LOGI(TAG, "Powering up debug...");
+    ret = swd_dp_write(DP_CTRL_STAT, 0x50000000);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to select CTRL-AP");
+        ESP_LOGE(TAG, "Failed to power up debug");
         return ret;
-    }
-    
-    // Step 2: Read current protection status (but don't trust it!)
-    ESP_LOGI(TAG, "Reading APPROTECTSTATUS...");
-    ret = swd_ap_read(CTRL_AP_APPROTECTSTATUS, &value);
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "APPROTECTSTATUS = 0x%08lX (%s)", value,
-                value == 0 ? "Shows as LOCKED" : "Shows as UNLOCKED");
-    }
-    
-    // Step 3: ALWAYS perform the erase, regardless of status!
-    ESP_LOGW(TAG, "*** PERFORMING FULL CHIP ERASE ***");
-    ESP_LOGW(TAG, "This will erase EVERYTHING including bootloader and SoftDevice!");
-    
-    // Assert reset during erase (some versions need this)
-    ESP_LOGI(TAG, "Asserting system reset...");
-    ret = swd_ap_write(CTRL_AP_RESET, 1);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to assert reset, continuing anyway");
     }
     vTaskDelay(pdMS_TO_TICKS(10));
     
-    // Step 4: Trigger ERASEALL - THIS IS THE KEY OPERATION
-    ESP_LOGI(TAG, "Writing to ERASEALL register...");
-    ret = swd_ap_write(CTRL_AP_ERASEALL, 1);
+    // Step 2: Read CTRL-AP IDR (at 0xFC, which is in bank 15)
+    // SELECT register format: [31:24]=APSEL, [7:4]=APBANKSEL
+    // For AP#1, bank 15 (0xF): APSEL=1, APBANKSEL=0xF
+    ESP_LOGI(TAG, "Reading CTRL-AP IDR (AP#1, bank 15)...");
+    ret = swd_dp_write(DP_SELECT, (1 << 24) | (0xF << 4));  // AP#1, Bank 15
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to write ERASEALL register!");
-        
-        // Try alternative approach: write 0x00000001 to offset 0x04
-        ESP_LOGI(TAG, "Trying alternative ERASEALL trigger...");
-        ret = swd_ap_write(0x04, 0x00000001);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Alternative ERASEALL also failed!");
-            return ret;
-        }
-    }
-    
-    ESP_LOGI(TAG, "ERASEALL triggered, waiting for completion...");
-    ESP_LOGI(TAG, "This can take 20-90 seconds for a full chip erase!");
-    
-    // Step 5: Poll ERASEALLSTATUS with longer timeout for full erase
-    uint32_t timeout_ms = 120000;  // 2 minutes (full erase can be slow)
-    uint32_t elapsed_ms = 0;
-    uint32_t poll_interval = 100;  // Check every 100ms
-    uint32_t last_status = 0xFFFFFFFF;
-    int unchanged_count = 0;
-    
-    while (elapsed_ms < timeout_ms) {
-        ret = swd_ap_read(CTRL_AP_ERASEALLSTATUS, &value);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to read ERASEALLSTATUS, retrying...");
-            vTaskDelay(pdMS_TO_TICKS(poll_interval));
-            elapsed_ms += poll_interval;
-            continue;
-        }
-        
-        if (value != last_status) {
-            ESP_LOGI(TAG, "[%lu ms] ERASEALLSTATUS = 0x%08lX", elapsed_ms, value);
-            last_status = value;
-            unchanged_count = 0;
-        } else {
-            unchanged_count++;
-        }
-        
-        // Status = 0 means erase complete
-        if (value == 0) {
-            ESP_LOGI(TAG, "✓ ERASEALL complete after %lu ms!", elapsed_ms);
-            break;
-        }
-        
-        // If status hasn't changed for a while, show progress
-        if (unchanged_count >= 50) {  // 5 seconds of no change
-            ESP_LOGI(TAG, "  Still erasing... %lu seconds elapsed", elapsed_ms / 1000);
-            unchanged_count = 0;
-        }
-        
-        vTaskDelay(pdMS_TO_TICKS(poll_interval));
-        elapsed_ms += poll_interval;
-    }
-    
-    if (elapsed_ms >= timeout_ms) {
-        ESP_LOGE(TAG, "✗ Erase timeout after %lu ms!", timeout_ms);
-        ESP_LOGE(TAG, "Last status was: 0x%08lX", value);
-        return ESP_ERR_TIMEOUT;
-    }
-    
-    // Step 6: Release reset
-    ESP_LOGI(TAG, "Releasing system reset...");
-    ret = swd_ap_write(CTRL_AP_RESET, 0);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to release reset");
-    }
-    
-    // Give the chip time to come out of reset
-    vTaskDelay(pdMS_TO_TICKS(500));
-    
-    // Step 7: Power cycle the debug interface
-    ESP_LOGI(TAG, "Power cycling debug interface...");
-    
-    // Disconnect and reconnect
-    swd_disconnect();
-    vTaskDelay(pdMS_TO_TICKS(100));
-    
-    // Clear errors and reconnect
-    swd_clear_errors();
-    
-    ESP_LOGI(TAG, "Reconnecting to target...");
-    ret = swd_connect();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to reconnect after erase");
-        
-        // Try a hard reset
-        ESP_LOGI(TAG, "Attempting hard reset sequence...");
-        swd_reset_target();
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        ret = swd_connect();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Still can't reconnect - chip may need power cycle");
-            return ret;
-        }
-    }
-    
-    // Step 8: Switch back to MEM-AP (AP#0)
-    ESP_LOGI(TAG, "Switching back to MEM-AP...");
-    ret = swd_dp_write(DP_SELECT, 0);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to select MEM-AP");
+        ESP_LOGE(TAG, "Failed to select AP#1 bank 15");
         return ret;
     }
     
-    // Reinitialize memory and flash interfaces
-    ret = swd_mem_init();
+    // Read IDR at offset 0x0C within bank 15 (0xFC = 0xF0 + 0x0C)
+    ret = swd_ap_read(0x0C, &value);  // 0x0C within the bank
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Memory init failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Failed to read CTRL-AP IDR");
+        return ret;
     }
     
-    ret = swd_flash_init();
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Flash init failed: %s", esp_err_to_name(ret));
+    ESP_LOGI(TAG, "CTRL-AP IDR = 0x%08lX", value);
+    
+    // Check if this is a Nordic CTRL-AP (mask out version bits)
+    if ((value & 0x0FFFFFFF) != 0x02880000) {
+        ESP_LOGE(TAG, "Not a Nordic CTRL-AP! Expected 0x02880000, got 0x%08lX", value);
+        return ESP_ERR_NOT_FOUND;
     }
     
-    // Step 9: Verify the erase worked
-    ESP_LOGI(TAG, "=== Verifying Full Chip Erase ===");
+    // Step 3: Switch to bank 0 for control registers
+    ESP_LOGI(TAG, "Switching to bank 0 for control registers...");
+    ret = swd_dp_write(DP_SELECT, (1 << 24) | (0 << 4));  // AP#1, Bank 0
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to select AP#1 bank 0");
+        return ret;
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
     
-    // Check various memory locations
-    uint32_t test_locations[] = {
-        0x00000000,  // Start of flash (reset vector)
-        0x00001000,  // MBR/Bootloader area  
-        0x00010000,  // Application area
-        0x000F4000,  // Bootloader location
-        0x10001000 + 0x208  // UICR APPROTECT
-    };
+    // Step 4: Read APPROTECTSTATUS
+    ret = swd_ap_read(0x0C, &value);  // CTRL_AP_APPROTECTSTATUS
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "APPROTECTSTATUS = 0x%08lX (%s)", value,
+                value == 0 ? "Protected" : "Not Protected");
+    }
     
-    const char *location_names[] = {
-        "Flash Start",
-        "MBR/Bootloader",
-        "Application",
-        "Bootloader",
-        "UICR_APPROTECT"
-    };
+    // Step 5: Trigger mass erase
+    ESP_LOGI(TAG, "Writing ERASEALL = 1...");
+    ret = swd_ap_write(0x04, 1);  // CTRL_AP_ERASEALL = 1
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to write ERASEALL!");
+        return ret;
+    }
     
-    bool all_erased = true;
-    for (int i = 0; i < 5; i++) {
-        uint32_t val;
-        ret = swd_mem_read32(test_locations[i], &val);
-        if (ret == ESP_OK) {
-            bool erased = (val == 0xFFFFFFFF);
-            ESP_LOGI(TAG, "%s [0x%08lX] = 0x%08lX %s", 
-                    location_names[i], test_locations[i], val,
-                    erased ? "✓ ERASED" : "✗ NOT ERASED!");
-            if (!erased) {
-                all_erased = false;
-            }
-        } else {
-            ESP_LOGE(TAG, "Failed to read %s [0x%08lX]", 
-                    location_names[i], test_locations[i]);
+    // Force write completion
+    uint32_t dummy;
+    swd_dp_read(DP_RDBUFF, &dummy);
+    
+    // Step 6: Poll ERASEALLSTATUS
+    ESP_LOGI(TAG, "Waiting for erase completion...");
+    uint32_t timeout_ms = 15000;  // 15 seconds as per pyOCD
+    uint32_t elapsed_ms = 0;
+    bool complete = false;
+    
+    while (elapsed_ms < timeout_ms) {
+        ret = swd_ap_read(0x08, &value);  // CTRL_AP_ERASEALLSTATUS
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to read ERASEALLSTATUS, retrying...");
+            // Re-select AP
+            swd_dp_write(DP_SELECT, (1 << 24) | (0 << 4));
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
         }
+        
+        if (value == 0) {  // CTRL_AP_ERASEALLSTATUS_READY
+            ESP_LOGI(TAG, "✓ Mass erase complete in %lu ms!", elapsed_ms);
+            complete = true;
+            break;
+        }
+        
+        // Log progress periodically
+        if ((elapsed_ms % 1000) == 0) {
+            ESP_LOGI(TAG, "Erasing... %lu ms elapsed (status=0x%08lX)", elapsed_ms, value);
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(100));  // Poll every 100ms like pyOCD
+        elapsed_ms += 100;
     }
     
-    if (all_erased) {
-        ESP_LOGW(TAG, "=== SUCCESS: Full Chip Erase Complete ===");
-        ESP_LOGW(TAG, "All flash memory has been erased!");
-        ESP_LOGW(TAG, "APPROTECT has been disabled!");
-        ESP_LOGW(TAG, "Device is ready for programming.");
-    } else {
-        ESP_LOGE(TAG, "=== WARNING: Some areas may not be fully erased ===");
-        ESP_LOGE(TAG, "Try power cycling the device and running erase again.");
+    if (!complete) {
+        ESP_LOGE(TAG, "✗ Mass erase timeout!");
+        return ESP_ERR_TIMEOUT;
     }
     
-    return all_erased ? ESP_OK : ESP_FAIL;
+    // Step 7: Reset sequence (as per pyOCD)
+    ESP_LOGI(TAG, "Performing reset sequence...");
+    swd_ap_write(0x00, 1);  // CTRL_AP_RESET = 1
+    swd_dp_read(DP_RDBUFF, &dummy);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    
+    swd_ap_write(0x00, 0);  // CTRL_AP_RESET = 0
+    swd_dp_read(DP_RDBUFF, &dummy);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    
+    swd_ap_write(0x04, 0);  // CTRL_AP_ERASEALL = 0
+    swd_dp_read(DP_RDBUFF, &dummy);
+    
+    // Step 8: Switch back to MEM-AP
+    ESP_LOGI(TAG, "Switching back to MEM-AP...");
+    ret = swd_dp_write(DP_SELECT, 0x00000000);  // AP#0, Bank 0
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to select MEM-AP");
+    }
+    
+    // Step 9: Reconnect
+    ESP_LOGI(TAG, "Reconnecting...");
+    swd_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    ret = swd_connect();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to reconnect - power cycle the device!");
+        return ret;
+    }
+    
+    swd_mem_init();
+    swd_flash_init();
+    
+    // Step 10: Verify
+    ESP_LOGI(TAG, "Verifying erase...");
+    uint32_t val;
+    ret = swd_mem_read32(0x00000000, &val);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Flash[0x0] = 0x%08lX %s", val, 
+                (val == 0xFFFFFFFF) ? "✓ ERASED" : "✗ NOT ERASED");
+    }
+    
+    ret = swd_mem_read32(0x10001208, &val);  // UICR.APPROTECT
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "APPROTECT = 0x%08lX %s", val,
+                (val == 0xFFFFFFFF) ? "✓ ERASED" : "✗ NOT ERASED");
+    }
+    
+    ESP_LOGW(TAG, "=== Mass Erase Complete ===");
+    return ESP_OK;
 }
 
 // Full chip erase (except UICR)

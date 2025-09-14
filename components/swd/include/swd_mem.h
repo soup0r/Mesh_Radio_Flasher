@@ -49,6 +49,9 @@ esp_err_t swd_halt_core(void);
 esp_err_t swd_resume_core(void);
 bool swd_is_halted(void);
 
+// Add this line to components/swd/include/swd_mem.h
+esp_err_t swd_mem_write_block32(uint32_t addr, const uint32_t *data, uint32_t count);
+
 // System control registers
 #define DHCSR_ADDR      0xE000EDF0  // Debug Halting Control and Status
 #define DCRSR_ADDR      0xE000EDF4  // Debug Core Register Selector

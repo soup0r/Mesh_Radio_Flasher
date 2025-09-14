@@ -386,3 +386,62 @@ bool swd_is_halted(void) {
     
     return (dhcsr & DHCSR_S_HALT) != 0;
 }
+
+// Add this function to swd_mem.c with minimal CSW configuration
+
+esp_err_t swd_mem_write_block32(uint32_t addr, const uint32_t *data, uint32_t count) {
+    if (!data || count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    // Must be word-aligned
+    if (addr & 0x3) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    esp_err_t ret;
+    
+    // Set CSW for 32-bit auto-increment mode with basic settings
+    // Just use the essential bits needed for auto-increment writes
+    uint32_t csw_value = CSW_ADDRINC_ON | CSW_SIZE_32BIT | CSW_DEVICE_EN | CSW_MASTER_DBG;
+    
+    ret = swd_ap_write(AP_CSW, csw_value);
+    if (ret != ESP_OK) return ret;
+    
+    // Write words in chunks that don't cross auto-increment boundaries
+    // The auto-increment wraps at 1KB boundaries (0x400) by default
+    uint32_t auto_inc_size = 0x400;  // 1KB auto-increment boundary
+    
+    while (count > 0) {
+        // Calculate how many words we can write before hitting boundary
+        uint32_t offset_in_page = addr & (auto_inc_size - 1);
+        uint32_t words_in_page = (auto_inc_size - offset_in_page) / 4;
+        if (words_in_page > count) {
+            words_in_page = count;
+        }
+        
+        // Set target address (only needed once per auto-increment sequence)
+        ret = swd_ap_write(AP_TAR, addr);
+        if (ret != ESP_OK) return ret;
+        
+        // Write all words in this chunk using auto-increment
+        // This is the key optimization - we write multiple words to DRW
+        // without updating TAR each time
+        for (uint32_t i = 0; i < words_in_page; i++) {
+            ret = swd_ap_write(AP_DRW, data[i]);
+            if (ret != ESP_OK) return ret;
+        }
+        
+        // Read RDBUFF once to ensure all writes complete
+        uint32_t dummy;
+        ret = swd_dp_read(DP_RDBUFF, &dummy);
+        if (ret != ESP_OK) return ret;
+        
+        // Move to next chunk
+        addr += words_in_page * 4;
+        data += words_in_page;
+        count -= words_in_page;
+    }
+    
+    return ESP_OK;
+}
