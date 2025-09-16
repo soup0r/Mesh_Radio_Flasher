@@ -609,6 +609,38 @@ esp_err_t swd_flash_erase_all(void) {
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "Full chip erase complete");
     }
-    
+
     return ret;
+}
+
+esp_err_t swd_flash_reset_and_run(void) {
+    ESP_LOGI(TAG, "Performing post-flash reset sequence...");
+
+    // 1. Ensure NVMC is in read-only mode
+    esp_err_t ret = swd_mem_write32(NVMC_CONFIG, NVMC_CONFIG_REN);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to set NVMC to read-only");
+    }
+
+    // 2. Wait for NVMC to be ready
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    // 3. Clear instruction cache
+    uint32_t icachecnf = 0x00000001;  // Enable cache
+    ret = swd_mem_write32(NVMC_ICACHECNF, icachecnf);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    // 4. Invalidate cache
+    icachecnf = 0x00000003;  // Enable + Invalidate
+    ret = swd_mem_write32(NVMC_ICACHECNF, icachecnf);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    // 5. Reset vector table to start of flash
+    ret = swd_mem_write32(NRF52_VTOR, 0x00000000);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to set VTOR");
+    }
+
+    // 6. Release and reset the target with full DP disconnect
+    return swd_release_target();
 }

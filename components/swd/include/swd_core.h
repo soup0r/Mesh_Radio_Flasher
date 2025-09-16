@@ -51,6 +51,7 @@ bool swd_is_initialized(void);
 // Low-level transfers (with automatic retry)
 esp_err_t swd_dp_read(uint8_t addr, uint32_t *data);
 esp_err_t swd_dp_write(uint8_t addr, uint32_t data);
+esp_err_t swd_dp_disconnect(void);
 esp_err_t swd_ap_read(uint8_t addr, uint32_t *data);
 esp_err_t swd_ap_write(uint8_t addr, uint32_t data);
 

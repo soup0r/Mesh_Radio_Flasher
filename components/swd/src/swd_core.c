@@ -344,6 +344,53 @@ esp_err_t swd_dp_write(uint8_t addr, uint32_t data) {
     return ESP_FAIL;
 }
 
+esp_err_t swd_dp_disconnect(void) {
+    ESP_LOGI(TAG, "Performing full DP disconnect sequence...");
+
+    // 1. First power down the debug domain
+    esp_err_t ret = swd_dp_write(DP_CTRL_STAT, 0x00000000);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to clear CTRL_STAT");
+    }
+
+    // 2. Wait for power down acknowledgment
+    for (int i = 0; i < 50; i++) {
+        uint32_t status = 0;
+        ret = swd_dp_read(DP_CTRL_STAT, &status);
+        if (ret == ESP_OK) {
+            // Check if both CSYSPWRUPACK and CDBGPWRUPACK are cleared
+            if ((status & 0xA0000000) == 0) {
+                ESP_LOGI(TAG, "Debug domain powered down");
+                break;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    // 3. Send disconnect sequence (50+ clocks with SWDIO high)
+    // This is the JTAG-to-dormant sequence that puts the DP in dormant state
+    SWDIO_DRIVE();
+    SWDIO_H();
+    for (int i = 0; i < 60; i++) {
+        clock_pulse();
+    }
+
+    // 4. Send SWD-to-dormant sequence (specific pattern)
+    // This ensures the DP is fully dormant
+    uint32_t dormant_seq = 0xE3BC;  // SWD to dormant
+    for (int i = 0; i < 16; i++) {
+        if (dormant_seq & (1 << i)) {
+            SWDIO_H();
+        } else {
+            SWDIO_L();
+        }
+        clock_pulse();
+    }
+
+    ESP_LOGI(TAG, "DP disconnect complete");
+    return ESP_OK;
+}
+
 // AP read with retry
 esp_err_t swd_ap_read(uint8_t addr, uint32_t *data) {
     if (!initialized || !data) {
@@ -537,72 +584,79 @@ esp_err_t swd_release_target(void) {
     if (!initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    
+
     ESP_LOGI(TAG, "Releasing target from debug mode...");
-    
-    // 1. First ensure the core is not halted
+
+    // 1. Resume core if halted
     uint32_t dhcsr;
     esp_err_t ret = swd_mem_read32(DHCSR_ADDR, &dhcsr);
     if (ret == ESP_OK && (dhcsr & DHCSR_S_HALT)) {
         ESP_LOGI(TAG, "Core is halted, resuming...");
         ret = swd_mem_write32(DHCSR_ADDR, DHCSR_DBGKEY | DHCSR_C_DEBUGEN);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to resume core");
-        }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    
-    // 2. Clear all debug enable bits
+
+    // 2. Clear all debug features
     ESP_LOGI(TAG, "Disabling debug mode...");
     ret = swd_mem_write32(DHCSR_ADDR, DHCSR_DBGKEY);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to clear debug control");
+        ESP_LOGW(TAG, "Failed to clear DHCSR");
     }
-    
-    // 3. Clear any sticky errors
-    swd_clear_errors();
-    
-    // 4. Perform system reset via AIRCR
-    ESP_LOGI(TAG, "Triggering system reset...");
-    ret = swd_mem_write32(NRF52_AIRCR, 0x05FA0004);
+
+    // 3. Clear DEMCR
+    ret = swd_mem_write32(DEMCR_ADDR, 0);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to trigger system reset via AIRCR");
+        ESP_LOGW(TAG, "Failed to clear DEMCR");
     }
-    
-    vTaskDelay(pdMS_TO_TICKS(50));
-    
+
+    // 4. Perform system reset
+    if (config.pin_reset >= 0) {
+        ESP_LOGI(TAG, "Performing hardware reset...");
+        gpio_set_level((gpio_num_t)config.pin_reset, 0);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        gpio_set_level((gpio_num_t)config.pin_reset, 1);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    } else {
+        ESP_LOGI(TAG, "Performing software reset via AIRCR...");
+        ret = swd_mem_write32(NRF52_AIRCR, 0x05FA0004);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    // 5. CRITICAL: Perform full DP disconnect (this is what pyOCD does)
+    swd_dp_disconnect();
+
+    ESP_LOGI(TAG, "Target release complete");
     return ESP_OK;
 }
 
-// Completely shutdown SWD
 esp_err_t swd_shutdown(void) {
     if (!initialized) {
         return ESP_OK;
     }
-    
+
     ESP_LOGI(TAG, "Shutting down SWD interface...");
-    
+
     if (connected) {
-        swd_release_target();
-        line_reset();
+        // Do full disconnect with DP power down
+        swd_dp_disconnect();
         connected = false;
     }
-    
-    // Release GPIO pins to high-impedance
+
+    // Now release GPIO pins to high-impedance
     gpio_set_direction((gpio_num_t)config.pin_swclk, GPIO_MODE_INPUT);
     gpio_set_direction((gpio_num_t)config.pin_swdio, GPIO_MODE_INPUT);
     gpio_set_pull_mode((gpio_num_t)config.pin_swclk, GPIO_FLOATING);
     gpio_set_pull_mode((gpio_num_t)config.pin_swdio, GPIO_FLOATING);
-    
+
     if (config.pin_reset >= 0) {
         gpio_set_level((gpio_num_t)config.pin_reset, 1);
         gpio_set_direction((gpio_num_t)config.pin_reset, GPIO_MODE_INPUT);
         gpio_set_pull_mode((gpio_num_t)config.pin_reset, GPIO_FLOATING);
     }
-    
+
     initialized = false;
     drive_phase = true;
-    
+
     ESP_LOGI(TAG, "SWD interface shutdown complete");
     return ESP_OK;
 }

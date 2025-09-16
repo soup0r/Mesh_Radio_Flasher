@@ -173,15 +173,12 @@ static void hex_flash_callback(hex_record_t *record, uint32_t abs_addr, void *ct
         }
         
         case HEX_TYPE_EOF:
-            // Flush any remaining data
             flush_buffer(uctx);
             ESP_LOGI(TAG, "Upload complete: %lu bytes flashed", uctx->flashed_bytes);
             snprintf(uctx->status_msg, sizeof(uctx->status_msg),
-                "Success: Flashed %lu bytes", uctx->flashed_bytes);
-    
-            // ADD THIS:
-            ESP_LOGI(TAG, "Flashing complete, releasing target for normal boot...");
-            swd_release_target();
+                    "Success: Flashed %lu bytes", uctx->flashed_bytes);
+            ESP_LOGI(TAG, "Flashing complete, performing reset sequence...");
+            swd_flash_reset_and_run();
             swd_shutdown();
             ESP_LOGI(TAG, "Target released - should now boot normally");
             break;

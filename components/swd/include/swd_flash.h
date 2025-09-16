@@ -91,5 +91,6 @@ const char* swd_flash_get_error_string(flash_status_t status);
 esp_err_t swd_flash_disable_approtect(void);
 esp_err_t swd_flash_erase_all(void);
 esp_err_t swd_flash_mass_erase_ctrl_ap(void);
+esp_err_t swd_flash_reset_and_run(void);
 
 #endif // SWD_FLASH_H
