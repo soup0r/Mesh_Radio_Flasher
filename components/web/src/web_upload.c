@@ -336,14 +336,14 @@ esp_err_t check_swd_handler(httpd_req_t *req) {
         
         // Determine APPROTECT status string
         const char *approtect_status;
-        if (approtect == 0xFFFFFF5A) {
-            approtect_status = "HwDisabled (Ready for flashing)";
-        } else if (approtect == 0xFFFFFFFF) {
-            approtect_status = "Erased (Protected on nRF52840!)";
-        } else if (approtect == 0xFFFFFF00) {
-            approtect_status = "Enabled (Fully protected)";
+        if (approtect == 0xFFFFFFFF) {
+            approtect_status = "Disabled (Open for debug)";
+        } else if (approtect == 0x0000005A || approtect == 0xFFFFFF5A) {
+            approtect_status = "HwDisabled (Hardware unlocked)";
+        } else if (approtect == 0xFFFFFF00 || approtect == 0x00000000) {
+            approtect_status = "ENABLED (Locked - Mass erase required!)";
         } else {
-            approtect_status = "Unknown/Custom";
+            approtect_status = "Unknown/Custom value";
         }
         
         // Determine NVMC state
@@ -459,9 +459,16 @@ esp_err_t mass_erase_handler(httpd_req_t *req) {
 static esp_err_t upload_post_handler(httpd_req_t *req) {
     char buf[1024];
     int remaining = req->content_len;
-    
+
     ESP_LOGI(TAG, "Starting hex upload: %d bytes", remaining);
-    
+
+    // Ensure SWD is ready at the start
+    esp_err_t ret = ensure_swd_ready();
+    if (ret != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "SWD not ready");
+        return ESP_FAIL;
+    }
+
     // Clean up any previous context
     if (g_upload_ctx) {
         if (g_upload_ctx->parser) {
@@ -470,14 +477,14 @@ static esp_err_t upload_post_handler(httpd_req_t *req) {
         free(g_upload_ctx->page_buffer);
         free(g_upload_ctx);
     }
-    
+
     // Allocate new context
     g_upload_ctx = calloc(1, sizeof(upload_context_t));
     if (!g_upload_ctx) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_FAIL;
     }
-    
+
     g_upload_ctx->page_buffer = malloc(PAGE_BUFFER_SIZE);
     if (!g_upload_ctx->page_buffer) {
         free(g_upload_ctx);
@@ -485,45 +492,38 @@ static esp_err_t upload_post_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_FAIL;
     }
-    
+
     memset(g_upload_ctx->page_buffer, 0xFF, PAGE_BUFFER_SIZE);
-    
+
     // Parse query string for target type
     char query[64] = {0};
     httpd_req_get_url_query_str(req, query, sizeof(query));
-    
+
     if (strstr(query, "type=bootloader")) {
-        // Bootloader hex files typically contain the full flash image
-        // including MBR at 0x0, SoftDevice, and bootloader at 0xF4000
-        ESP_LOGI(TAG, "Flashing bootloader - using addresses from hex file");
-        g_upload_ctx->start_addr = 0xFFFFFFFF; // Use hex file addresses
+        ESP_LOGI(TAG, "Flashing bootloader");
+        g_upload_ctx->start_addr = 0xFFFFFFFF;
     } else if (strstr(query, "type=app")) {
-        g_upload_ctx->start_addr = 0x26000;  // After SoftDevice
+        g_upload_ctx->start_addr = 0x26000;
         ESP_LOGI(TAG, "Flashing application at 0x26000");
     } else if (strstr(query, "type=softdevice")) {
         g_upload_ctx->start_addr = 0x1000;
         ESP_LOGI(TAG, "Flashing SoftDevice at 0x1000");
     } else {
-        g_upload_ctx->start_addr = 0xFFFFFFFF; // Use hex addresses
+        g_upload_ctx->start_addr = 0xFFFFFFFF;
         ESP_LOGI(TAG, "Flashing at addresses from hex file");
-    }
-    
-    // Add after parsing query string, before creating hex parser:
-    esp_err_t ret = ensure_swd_ready();
-    if (ret != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "SWD not ready");
-        return ESP_FAIL;
     }
 
     // Create hex parser
     g_upload_ctx->parser = hex_stream_create(hex_flash_callback, g_upload_ctx);
     g_upload_ctx->in_progress = true;
     g_upload_ctx->total_bytes = remaining;
-    
+    g_upload_ctx->received_bytes = 0;  // Initialize to 0
+    g_upload_ctx->flashed_bytes = 0;   // Initialize to 0
+
     // Process upload
     while (remaining > 0) {
         int recv_len = httpd_req_recv(req, buf, MIN(remaining, sizeof(buf)));
-        
+
         if (recv_len <= 0) {
             if (recv_len == HTTPD_SOCK_ERR_TIMEOUT) {
                 continue;
@@ -534,9 +534,13 @@ static esp_err_t upload_post_handler(httpd_req_t *req) {
                     "Error: Upload failed");
             break;
         }
-        
+
+        // Update received bytes BEFORE parsing
+        g_upload_ctx->received_bytes += recv_len;
+        remaining -= recv_len;
+
         // Parse hex data
-        esp_err_t ret = hex_stream_parse(g_upload_ctx->parser, (uint8_t*)buf, recv_len);
+        ret = hex_stream_parse(g_upload_ctx->parser, (uint8_t*)buf, recv_len);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Hex parse failed");
             g_upload_ctx->error = true;
@@ -544,60 +548,55 @@ static esp_err_t upload_post_handler(httpd_req_t *req) {
                     "Error: Invalid hex file");
             break;
         }
-        
-        g_upload_ctx->received_bytes += recv_len;
-        remaining -= recv_len;
-        
-        // Log progress
-        if ((g_upload_ctx->received_bytes % 10240) == 0) {
+
+        // Log progress every 4KB
+        if ((g_upload_ctx->received_bytes % 4096) == 0) {
             int percent = (g_upload_ctx->received_bytes * 100) / g_upload_ctx->total_bytes;
-            ESP_LOGI(TAG, "Upload: %d%% (%lu/%lu bytes)", 
+            ESP_LOGI(TAG, "Upload: %d%% (%lu/%lu bytes)",
                     percent, g_upload_ctx->received_bytes, g_upload_ctx->total_bytes);
         }
     }
-    
+
     g_upload_ctx->in_progress = false;
-    
+
     // Send response
     char resp[256];
     if (!g_upload_ctx->error) {
-        snprintf(resp, sizeof(resp), 
-                "{\"status\":\"success\",\"message\":\"%s\"}", 
+        snprintf(resp, sizeof(resp),
+                "{\"status\":\"success\",\"message\":\"%s\"}",
                 g_upload_ctx->status_msg);
     } else {
-        snprintf(resp, sizeof(resp), 
-                "{\"status\":\"error\",\"message\":\"%s\"}", 
+        snprintf(resp, sizeof(resp),
+                "{\"status\":\"error\",\"message\":\"%s\"}",
                 g_upload_ctx->status_msg);
     }
-    
+
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, strlen(resp));
-    
+
     return ESP_OK;
 }
 
-// Progress handler
 static esp_err_t progress_handler(httpd_req_t *req) {
-    char resp[256];
-    
+    char resp[512];
+
     if (g_upload_ctx && g_upload_ctx->in_progress) {
-        int upload_percent = (g_upload_ctx->received_bytes * 100) / g_upload_ctx->total_bytes;
-        int flash_percent = (g_upload_ctx->flashed_bytes * 100) / g_upload_ctx->total_bytes;
-        
         snprintf(resp, sizeof(resp),
-                "{\"in_progress\":true,\"upload_percent\":%d,\"flash_percent\":%d,"
-                "\"received\":%lu,\"flashed\":%lu,\"total\":%lu}",
-                upload_percent, flash_percent,
-                g_upload_ctx->received_bytes, g_upload_ctx->flashed_bytes,
+                "{\"in_progress\":true,\"received\":%lu,\"flashed\":%lu,\"total\":%lu}",
+                g_upload_ctx->received_bytes,
+                g_upload_ctx->flashed_bytes,
                 g_upload_ctx->total_bytes);
     } else if (g_upload_ctx) {
         snprintf(resp, sizeof(resp),
-                "{\"in_progress\":false,\"message\":\"%s\"}",
-                g_upload_ctx->status_msg);
+                "{\"in_progress\":false,\"message\":\"%s\",\"received\":%lu,\"flashed\":%lu,\"total\":%lu}",
+                g_upload_ctx->status_msg,
+                g_upload_ctx->received_bytes,
+                g_upload_ctx->flashed_bytes,
+                g_upload_ctx->total_bytes);
     } else {
         strcpy(resp, "{\"in_progress\":false,\"message\":\"Ready\"}");
     }
-    
+
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, strlen(resp));
     return ESP_OK;
