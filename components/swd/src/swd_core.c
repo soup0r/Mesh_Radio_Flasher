@@ -1,5 +1,7 @@
 // swd_core.c - Complete SWD Protocol Implementation
 #include "swd_core.h"
+#include "swd_mem.h"
+#include "nrf52_hal.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "soc/gpio_struct.h"
@@ -428,19 +430,9 @@ esp_err_t swd_connect(void) {
     return ESP_OK;
 }
 
-// Disconnect from target
+// Replace the existing swd_disconnect() function with:
 esp_err_t swd_disconnect(void) {
-    if (!initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    connected = false;
-    
-    // Send line reset to leave target in known state
-    line_reset();
-    
-    ESP_LOGI(TAG, "Disconnected from target");
-    return ESP_OK;
+    return swd_disconnect_enhanced();
 }
 
 // Check connection status
@@ -531,4 +523,126 @@ esp_err_t swd_power_up(void) {
     
     ESP_LOGE(TAG, "Power up timeout");
     return ESP_ERR_TIMEOUT;
+}
+
+// Add all these new functions at the end of swd_core.c
+
+// Check if SWD interface is initialized
+bool swd_is_initialized(void) {
+    return initialized;
+}
+
+// Release target from debug mode
+esp_err_t swd_release_target(void) {
+    if (!initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    ESP_LOGI(TAG, "Releasing target from debug mode...");
+    
+    // 1. First ensure the core is not halted
+    uint32_t dhcsr;
+    esp_err_t ret = swd_mem_read32(DHCSR_ADDR, &dhcsr);
+    if (ret == ESP_OK && (dhcsr & DHCSR_S_HALT)) {
+        ESP_LOGI(TAG, "Core is halted, resuming...");
+        ret = swd_mem_write32(DHCSR_ADDR, DHCSR_DBGKEY | DHCSR_C_DEBUGEN);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to resume core");
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    
+    // 2. Clear all debug enable bits
+    ESP_LOGI(TAG, "Disabling debug mode...");
+    ret = swd_mem_write32(DHCSR_ADDR, DHCSR_DBGKEY);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to clear debug control");
+    }
+    
+    // 3. Clear any sticky errors
+    swd_clear_errors();
+    
+    // 4. Perform system reset via AIRCR
+    ESP_LOGI(TAG, "Triggering system reset...");
+    ret = swd_mem_write32(NRF52_AIRCR, 0x05FA0004);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to trigger system reset via AIRCR");
+    }
+    
+    vTaskDelay(pdMS_TO_TICKS(50));
+    
+    return ESP_OK;
+}
+
+// Completely shutdown SWD
+esp_err_t swd_shutdown(void) {
+    if (!initialized) {
+        return ESP_OK;
+    }
+    
+    ESP_LOGI(TAG, "Shutting down SWD interface...");
+    
+    if (connected) {
+        swd_release_target();
+        line_reset();
+        connected = false;
+    }
+    
+    // Release GPIO pins to high-impedance
+    gpio_set_direction((gpio_num_t)config.pin_swclk, GPIO_MODE_INPUT);
+    gpio_set_direction((gpio_num_t)config.pin_swdio, GPIO_MODE_INPUT);
+    gpio_set_pull_mode((gpio_num_t)config.pin_swclk, GPIO_FLOATING);
+    gpio_set_pull_mode((gpio_num_t)config.pin_swdio, GPIO_FLOATING);
+    
+    if (config.pin_reset >= 0) {
+        gpio_set_level((gpio_num_t)config.pin_reset, 1);
+        gpio_set_direction((gpio_num_t)config.pin_reset, GPIO_MODE_INPUT);
+        gpio_set_pull_mode((gpio_num_t)config.pin_reset, GPIO_FLOATING);
+    }
+    
+    initialized = false;
+    drive_phase = true;
+    
+    ESP_LOGI(TAG, "SWD interface shutdown complete");
+    return ESP_OK;
+}
+
+// Enhanced disconnect
+esp_err_t swd_disconnect_enhanced(void) {
+    if (!initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    ESP_LOGI(TAG, "Disconnecting from target...");
+    
+    if (connected) {
+        swd_release_target();
+        connected = false;
+    }
+    
+    ESP_LOGI(TAG, "Disconnected from target");
+    return ESP_OK;
+}
+
+// Reinitialize SWD when needed
+esp_err_t swd_reinit(void) {
+    if (initialized) {
+        gpio_set_direction((gpio_num_t)config.pin_swclk, GPIO_MODE_OUTPUT);
+        gpio_set_direction((gpio_num_t)config.pin_swdio, GPIO_MODE_INPUT_OUTPUT);
+        gpio_set_pull_mode((gpio_num_t)config.pin_swdio, GPIO_PULLUP_ONLY);
+        
+        if (config.pin_reset >= 0) {
+            gpio_set_direction((gpio_num_t)config.pin_reset, GPIO_MODE_OUTPUT);
+            gpio_set_level((gpio_num_t)config.pin_reset, 1);
+        }
+        
+        SWCLK_L();
+        SWDIO_H();
+        SWDIO_DRIVE();
+        drive_phase = true;
+        
+        return ESP_OK;
+    }
+    
+    return swd_init(&config);
 }

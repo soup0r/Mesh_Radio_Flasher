@@ -34,6 +34,44 @@ typedef struct {
 
 static upload_context_t *g_upload_ctx = NULL;
 
+// Helper function to ensure SWD is ready
+static esp_err_t ensure_swd_ready(void) {
+    if (!swd_is_initialized()) {
+        ESP_LOGI(TAG, "Reinitializing SWD for operation...");
+        
+        swd_config_t swd_cfg = {
+            .pin_swclk = 8,
+            .pin_swdio = 9,
+            .pin_reset = 7,
+            .delay_cycles = 0
+        };
+        
+        esp_err_t ret = swd_init(&swd_cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to reinitialize SWD");
+            return ret;
+        }
+    } else {
+        swd_reinit();
+    }
+    
+    if (!swd_is_connected()) {
+        ESP_LOGI(TAG, "Connecting to target...");
+        esp_err_t ret = swd_connect();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to connect to target");
+            return ret;
+        }
+        
+        ret = swd_flash_init();
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Flash init failed: %s", esp_err_to_name(ret));
+        }
+    }
+    
+    return ESP_OK;
+}
+
 // Helper function for SWD reconnection
 static esp_err_t check_and_reconnect_swd(void) {
     if (swd_is_connected()) {
@@ -139,7 +177,13 @@ static void hex_flash_callback(hex_record_t *record, uint32_t abs_addr, void *ct
             flush_buffer(uctx);
             ESP_LOGI(TAG, "Upload complete: %lu bytes flashed", uctx->flashed_bytes);
             snprintf(uctx->status_msg, sizeof(uctx->status_msg),
-                    "Success: Flashed %lu bytes", uctx->flashed_bytes);
+                "Success: Flashed %lu bytes", uctx->flashed_bytes);
+    
+            // ADD THIS:
+            ESP_LOGI(TAG, "Flashing complete, releasing target for normal boot...");
+            swd_release_target();
+            swd_shutdown();
+            ESP_LOGI(TAG, "Target released - should now boot normally");
             break;
             
         case HEX_TYPE_EXT_LIN_ADDR:
@@ -211,7 +255,7 @@ esp_err_t check_swd_handler(httpd_req_t *req) {
     ESP_LOGI(TAG, "=== SWD Status Check Requested ===");
     
     // Check and try to reconnect if needed
-    esp_err_t ret = check_and_reconnect_swd();
+    esp_err_t ret = ensure_swd_ready();
     bool connected = (ret == ESP_OK);
     
     if (connected) {
@@ -371,6 +415,11 @@ esp_err_t check_swd_handler(httpd_req_t *req) {
             esp_err_to_name(ret));
     }
     
+    if (connected) {
+        ESP_LOGI(TAG, "Status check complete, releasing SWD...");
+        swd_shutdown();
+    }
+
     ESP_LOGI(TAG, "=== SWD Status Check Complete ===");
     
     httpd_resp_set_type(req, "application/json");
@@ -385,22 +434,10 @@ esp_err_t mass_erase_handler(httpd_req_t *req) {
     char resp[256];
     
     // First check SWD connection
-    if (!swd_is_connected()) {
-        ESP_LOGW(TAG, "SWD not connected, attempting connection...");
-        esp_err_t ret = check_and_reconnect_swd();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to connect SWD: %s", esp_err_to_name(ret));
-            snprintf(resp, sizeof(resp), 
-                "{\"success\":false,\"message\":\"SWD connection failed: %s\"}", 
-                esp_err_to_name(ret));
-            httpd_resp_set_type(req, "application/json");
-            httpd_resp_send(req, resp, strlen(resp));
-            return ESP_OK;
-        }
-    }
-    
+    esp_err_t ret = ensure_swd_ready();
+
     // Perform mass erase (which also handles APPROTECT)
-    esp_err_t ret = swd_flash_disable_approtect();
+    ret = swd_flash_disable_approtect();
     
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "Mass erase successful, APPROTECT disabled");
@@ -411,6 +448,10 @@ esp_err_t mass_erase_handler(httpd_req_t *req) {
             "{\"success\":false,\"message\":\"Mass erase failed: %s\"}", 
             esp_err_to_name(ret));
     }
+    
+    ESP_LOGI(TAG, "Mass erase complete, releasing target...");
+    swd_release_target();
+    swd_shutdown();
     
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, strlen(resp));
@@ -470,6 +511,13 @@ static esp_err_t upload_post_handler(httpd_req_t *req) {
         ESP_LOGI(TAG, "Flashing at addresses from hex file");
     }
     
+    // Add after parsing query string, before creating hex parser:
+    esp_err_t ret = ensure_swd_ready();
+    if (ret != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "SWD not ready");
+        return ESP_FAIL;
+    }
+
     // Create hex parser
     g_upload_ctx->parser = hex_stream_create(hex_flash_callback, g_upload_ctx);
     g_upload_ctx->in_progress = true;

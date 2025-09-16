@@ -42,6 +42,11 @@ esp_err_t swd_init(const swd_config_t *config);
 esp_err_t swd_connect(void);
 esp_err_t swd_disconnect(void);
 bool swd_is_connected(void);
+esp_err_t swd_shutdown(void);
+esp_err_t swd_release_target(void);
+esp_err_t swd_disconnect_enhanced(void);
+esp_err_t swd_reinit(void);
+bool swd_is_initialized(void);
 
 // Low-level transfers (with automatic retry)
 esp_err_t swd_dp_read(uint8_t addr, uint32_t *data);

@@ -76,6 +76,7 @@ static void test_swd_functions(void);
 static void test_memory_regions(void);
 static esp_err_t start_webserver(void);
 static void stop_webserver(void);
+static esp_err_t release_swd_handler(httpd_req_t *req);
 
 // Initialize configuration from wifi_credentials.h
 static void init_config(void) {
@@ -142,6 +143,7 @@ static esp_err_t root_handler(httpd_req_t *req) {
         "<p class='warning'>⚠️ Warning: Mass erase will DELETE ALL DATA on the chip!</p>"
         "<p>Mass erase is required to disable APPROTECT and allow flashing.</p>"
         "<button class='btn btn-danger' onclick='massErase()'>Mass Erase & Disable APPROTECT</button>"
+        "<button class='btn' onclick='releaseSWD()'>Release Target</button>"
         "<button class='btn' onclick='checkSWD()'>Check SWD Status</button>"
         "<div id='protStatus' style='margin-top:10px;'></div>"
         "<div id='regDump' style='margin-top:10px;font-family:monospace;font-size:12px;'></div>"
@@ -186,6 +188,11 @@ static esp_err_t root_handler(httpd_req_t *req) {
         "fetch('/mass_erase').then(r=>r.json()).then(data=>{"
         "document.getElementById('protStatus').innerText=data.message;"
         "setTimeout(checkSWD,2000);"
+        "});"
+        "}"
+        "function releaseSWD(){"
+        "fetch('/release_swd').then(r=>r.text()).then(()=>{"
+        "alert('Target released from debug mode');"
         "});"
         "}"
         "function checkSWD(){"
@@ -283,6 +290,14 @@ static esp_err_t start_webserver(void) {
             .handler = root_handler,
             .user_ctx = NULL
         };
+
+        httpd_uri_t release_uri = {
+            .uri = "/release_swd",
+            .method = HTTP_GET,
+            .handler = release_swd_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(web_server, &release_uri);
         
         httpd_register_uri_handler(web_server, &root_uri);
         
@@ -575,9 +590,14 @@ static esp_err_t try_swd_connection(void) {
         
         test_swd_functions();
         test_memory_regions();  // Run comprehensive memory test on connection
+        ESP_LOGI(TAG, "Initial test complete, shutting down SWD to release target...");
+        swd_shutdown();
+        xEventGroupClearBits(system_events, SWD_CONNECTED_BIT);
+        ESP_LOGI(TAG, "SWD shutdown - target released for normal operation");
     } else {
         xEventGroupClearBits(system_events, SWD_CONNECTED_BIT);
         ESP_LOGE(TAG, "✗ SWD connection failed with error: 0x%x", ret);
+        swd_shutdown();
     }
 
     if (ret == ESP_OK) {
@@ -594,6 +614,8 @@ static esp_err_t try_swd_connection(void) {
             }
         }
     }
+
+
 
     ESP_LOGI(TAG, "=== SWD Connection Attempt Complete ===");
     return ret;
@@ -677,6 +699,16 @@ static void init_system(void) {
     try_swd_connection();
     
     xTaskCreate(system_health_task, "health", 4096, NULL, 5, NULL);
+}
+
+static esp_err_t release_swd_handler(httpd_req_t *req) {
+    ESP_LOGI(TAG, "Manual SWD release requested");
+    if (swd_is_connected()) {
+        swd_release_target();
+        swd_shutdown();
+    }
+    httpd_resp_send(req, "Released", 8);
+    return ESP_OK;
 }
 
 // Main application entry
