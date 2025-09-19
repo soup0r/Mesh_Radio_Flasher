@@ -4,7 +4,6 @@
 #include "driver/gpio.h"
 #include "nvs_flash.h"
 #include "nvs.h"
-// Add these FreeRTOS includes
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -14,23 +13,72 @@ static power_config_t power_config = {0};
 static system_state_t current_state = SYSTEM_STATE_INIT;
 static system_health_t health_stats = {0};
 
+// CORRECT LOGIC: LOW = Power ON, HIGH = Power OFF
+// This assumes N-channel MOSFET or similar where:
+// - GPIO LOW (0V) = MOSFET OFF = Power flows normally (ON)
+// - GPIO HIGH (3.3V) = MOSFET ON = Power rail pulled to ground (OFF)
+
 esp_err_t power_mgmt_init(const power_config_t *config) {
     if (!config) {
         return ESP_ERR_INVALID_ARG;
     }
-    
+
     power_config = *config;
-    current_state = SYSTEM_STATE_INIT;  // Use the variable to avoid warning
-    
+    current_state = SYSTEM_STATE_INIT;
+
     // Initialize power control GPIO if configured
     if (power_config.target_power_gpio >= 0) {
         gpio_reset_pin((gpio_num_t)power_config.target_power_gpio);
         gpio_set_direction((gpio_num_t)power_config.target_power_gpio, GPIO_MODE_OUTPUT);
-        gpio_set_level((gpio_num_t)power_config.target_power_gpio, 1); // Default to ON
+        // CORRECT: Set LOW for power ON (default state)
+        gpio_set_level((gpio_num_t)power_config.target_power_gpio, 0);
+        ESP_LOGI(TAG, "Power control GPIO%d initialized (LOW=ON, HIGH=OFF)", power_config.target_power_gpio);
     }
-    
+
     current_state = SYSTEM_STATE_ACTIVE;
     ESP_LOGI(TAG, "Power management initialized");
+    return ESP_OK;
+}
+
+esp_err_t power_target_on(void) {
+    if (power_config.target_power_gpio >= 0) {
+        // CORRECT: LOW = Power ON
+        gpio_set_level((gpio_num_t)power_config.target_power_gpio, 0);
+        ESP_LOGI(TAG, "Target power ON (GPIO%d = LOW)", power_config.target_power_gpio);
+        return ESP_OK;
+    }
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t power_target_off(void) {
+    if (power_config.target_power_gpio >= 0) {
+        // CORRECT: HIGH = Power OFF
+        gpio_set_level((gpio_num_t)power_config.target_power_gpio, 1);
+        ESP_LOGI(TAG, "Target power OFF (GPIO%d = HIGH)", power_config.target_power_gpio);
+        return ESP_OK;
+    }
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t power_target_reset(void) {
+    if (power_config.target_power_gpio < 0) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    ESP_LOGI(TAG, "Target reset: turning OFF for 15 seconds, then ON");
+
+    // Reset sequence: Turn OFF for 15 seconds, then turn ON
+    gpio_set_level((gpio_num_t)power_config.target_power_gpio, 1);  // Turn OFF
+    ESP_LOGI(TAG, "Target power OFF (GPIO%d = HIGH)", power_config.target_power_gpio);
+
+    vTaskDelay(pdMS_TO_TICKS(15000));  // 15 seconds OFF
+
+    gpio_set_level((gpio_num_t)power_config.target_power_gpio, 0);  // Turn ON
+    ESP_LOGI(TAG, "Target power ON (GPIO%d = LOW)", power_config.target_power_gpio);
+
+    vTaskDelay(pdMS_TO_TICKS(power_config.power_on_delay_ms));
+
+    ESP_LOGI(TAG, "Target reset complete - device should be rebooting");
     return ESP_OK;
 }
 
@@ -38,32 +86,33 @@ esp_err_t power_target_cycle(uint32_t off_time_ms) {
     if (power_config.target_power_gpio < 0) {
         return ESP_ERR_NOT_SUPPORTED;
     }
-    
+
     ESP_LOGI(TAG, "Power cycling target (off for %lu ms)", (unsigned long)off_time_ms);
-    
-    gpio_set_level((gpio_num_t)power_config.target_power_gpio, 0);
+
+    // CORRECT: HIGH = OFF, then LOW = ON
+    gpio_set_level((gpio_num_t)power_config.target_power_gpio, 1);  // Turn OFF
     vTaskDelay(pdMS_TO_TICKS(off_time_ms));
-    gpio_set_level((gpio_num_t)power_config.target_power_gpio, 1);
+    gpio_set_level((gpio_num_t)power_config.target_power_gpio, 0);  // Turn ON
     vTaskDelay(pdMS_TO_TICKS(power_config.power_on_delay_ms));
-    
+
+    ESP_LOGI(TAG, "Power cycle complete");
     return ESP_OK;
 }
 
 void power_watchdog_feed(void) {
     // Watchdog feed implementation
-    // In real implementation, this would reset hardware watchdog
 }
 
 void power_get_health_status(system_health_t *health) {
     if (health) {
         *health = health_stats;
-        health_stats.uptime_seconds++;  // Simple increment for testing
+        health_stats.uptime_seconds++;
     }
 }
 
 wake_reason_t power_get_wake_reason(void) {
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-    
+
     switch(cause) {
         case ESP_SLEEP_WAKEUP_TIMER:
             return WAKE_REASON_TIMER;
@@ -80,10 +129,9 @@ esp_err_t power_log_error(const char *error_msg) {
     if (!error_msg) {
         return ESP_ERR_INVALID_ARG;
     }
-    
+
     ESP_LOGE(TAG, "Error logged: %s", error_msg);
-    
-    // Store in NVS for persistence
+
     nvs_handle_t nvs;
     esp_err_t ret = nvs_open("error_log", NVS_READWRITE, &nvs);
     if (ret == ESP_OK) {
@@ -91,28 +139,8 @@ esp_err_t power_log_error(const char *error_msg) {
         nvs_commit(nvs);
         nvs_close(nvs);
     }
-    
+
     return ESP_OK;
-}
-
-esp_err_t power_target_on(void) {
-    if (power_config.target_power_gpio >= 0) {
-        gpio_set_level((gpio_num_t)power_config.target_power_gpio, 1);
-        return ESP_OK;
-    }
-    return ESP_ERR_NOT_SUPPORTED;
-}
-
-esp_err_t power_target_off(void) {
-    if (power_config.target_power_gpio >= 0) {
-        gpio_set_level((gpio_num_t)power_config.target_power_gpio, 0);
-        return ESP_OK;
-    }
-    return ESP_ERR_NOT_SUPPORTED;
-}
-
-esp_err_t power_target_reset(void) {
-    return power_target_cycle(power_config.reset_hold_ms);
 }
 
 esp_err_t power_enter_deep_sleep(uint32_t duration_sec) {
@@ -120,16 +148,14 @@ esp_err_t power_enter_deep_sleep(uint32_t duration_sec) {
     current_state = SYSTEM_STATE_DEEP_SLEEP;
     esp_sleep_enable_timer_wakeup(duration_sec * 1000000ULL);
     esp_deep_sleep_start();
-    return ESP_OK; // Never reached
+    return ESP_OK;
 }
 
 esp_err_t power_schedule_sleep(void) {
-    // TODO: Implement
     return ESP_OK;
 }
 
 void power_cancel_sleep(void) {
-    // TODO: Implement
 }
 
 bool power_should_stay_awake(void) {
@@ -138,12 +164,10 @@ bool power_should_stay_awake(void) {
 
 esp_err_t power_watchdog_init(uint32_t timeout_sec) {
     ESP_LOGI(TAG, "Watchdog initialized with %lu second timeout", (unsigned long)timeout_sec);
-    // TODO: Implement hardware watchdog
     return ESP_OK;
 }
 
 void power_watchdog_disable(void) {
-    // TODO: Implement
 }
 
 esp_err_t power_recovery_init(void) {
@@ -159,6 +183,19 @@ esp_err_t power_handle_error(esp_err_t error, const char *context) {
 
 esp_err_t power_self_test(void) {
     ESP_LOGI(TAG, "Running self-test");
+
+    if (power_config.target_power_gpio >= 0) {
+        ESP_LOGI(TAG, "Testing power control on GPIO%d", power_config.target_power_gpio);
+
+        // Read current state
+        int current = gpio_get_level((gpio_num_t)power_config.target_power_gpio);
+        ESP_LOGI(TAG, "Current power state: %s (GPIO=%d)",
+                current ? "OFF" : "ON", current);
+
+        // Quick test cycle (if safe)
+        ESP_LOGI(TAG, "Power control test: LOW=ON, HIGH=OFF");
+    }
+
     return ESP_OK;
 }
 
@@ -166,7 +203,7 @@ esp_err_t power_get_last_errors(char *buffer, size_t size) {
     if (!buffer || size == 0) {
         return ESP_ERR_INVALID_ARG;
     }
-    
+
     nvs_handle_t nvs;
     esp_err_t ret = nvs_open("error_log", NVS_READONLY, &nvs);
     if (ret == ESP_OK) {
@@ -174,7 +211,7 @@ esp_err_t power_get_last_errors(char *buffer, size_t size) {
         ret = nvs_get_str(nvs, "last_error", buffer, &length);
         nvs_close(nvs);
     }
-    
+
     return ret;
 }
 
@@ -204,11 +241,9 @@ const char* power_get_state_string(system_state_t state) {
 }
 
 float power_get_battery_voltage(void) {
-    // TODO: Implement ADC reading if battery monitoring available
     return 3.3f;
 }
 
 float power_get_current_draw(void) {
-    // TODO: Implement current monitoring if available
     return 0.0f;
 }

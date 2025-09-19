@@ -1,4 +1,20 @@
 // bt_proxy.c - Bluetooth to WiFi Proxy for RAK4631
+#ifdef CONFIG_IDF_TARGET_ESP32C3
+// ESP32C3 doesn't support Bluedroid - stub implementation
+#warning "Bluetooth proxy not available on ESP32C3"
+
+esp_err_t bt_proxy_init(uint16_t tcp_port) { return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t bt_proxy_scan_and_connect(const char *device_name) { return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t bt_proxy_disconnect(void) { return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t bt_proxy_send_command(const char *command) { return ESP_ERR_NOT_SUPPORTED; }
+void bt_proxy_get_stats(bt_proxy_stats_t *stats) { if (stats) memset(stats, 0, sizeof(bt_proxy_stats_t)); }
+esp_err_t bt_proxy_deinit(void) { return ESP_ERR_NOT_SUPPORTED; }
+void bt_proxy_set_auto_reconnect(bool enable) {}
+void bt_proxy_set_target_name(const char *name) {}
+#include <string.h>
+
+#else
+// Original ESP32/ESP32S3 implementation follows...
 #include "bt_proxy.h"
 #include "esp_log.h"
 #include "esp_bt.h"
@@ -705,4 +721,4 @@ esp_err_t bt_proxy_deinit(void) {
     
     ESP_LOGI(TAG, "Bluetooth proxy deinitialized");
     return ESP_OK;
-}
+}#endif

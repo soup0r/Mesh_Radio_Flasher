@@ -286,12 +286,36 @@
                             <span class="info-value" id="power-status">Unknown</span>
                         </div>
                         <div class="info-item">
+                            <span class="info-label">APPROTECT:</span>
+                            <span class="info-value" id="approtect-status">Unknown</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Device ID:</span>
+                            <span class="info-value" id="device-id">Unknown</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Flash Size:</span>
+                            <span class="info-value" id="flash-size">Unknown</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">RAM Size:</span>
+                            <span class="info-value" id="ram-size">Unknown</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Core State:</span>
+                            <span class="info-value" id="core-state">Unknown</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">NVMC:</span>
+                            <span class="info-value" id="nvmc-state">Unknown</span>
+                        </div>
+                        <div class="info-item">
                             <span class="info-label">Bluetooth:</span>
                             <span class="info-value" id="bt-status">Disconnected</span>
                         </div>
                         <div class="info-item">
-                            <span class="info-label">Last Flash:</span>
-                            <span class="info-value" id="last-flash">Never</span>
+                            <span class="info-label">Last Check:</span>
+                            <span class="info-value" id="last-check">Never</span>
                         </div>
                     </div>
                 </div>
@@ -475,34 +499,112 @@ SWD status will appear here after connection check...
 
         // SWD status check for home tab
         function checkSWDForHome() {
+            console.log('Starting checkSWDForHome...');
             fetch('/check_swd')
-                .then(r => r.json())
+                .then(r => {
+                    console.log('SWD response status:', r.status);
+                    if (!r.ok) {
+                        throw new Error('HTTP ' + r.status + ': ' + r.statusText);
+                    }
+                    return r.json();
+                })
                 .then(data => {
+                    console.log('Home SWD data received:', data);
+                    console.log('data.connected:', data.connected);
+                    console.log('data.approtect_status:', data.approtect_status);
+                    console.log('data.device_id:', data.device_id);
+
                     const rakStatusElement = document.getElementById('rak-status');
                     const swdStatusElement = document.getElementById('swd-status');
                     const powerStatusElement = document.getElementById('power-status');
+                    const approtectElement = document.getElementById('approtect-status');
+                    const deviceIdElement = document.getElementById('device-id');
+                    const flashSizeElement = document.getElementById('flash-size');
+                    const ramSizeElement = document.getElementById('ram-size');
+                    const coreStateElement = document.getElementById('core-state');
+                    const nvmcStateElement = document.getElementById('nvmc-state');
                     const btStatusElement = document.getElementById('bt-status');
+                    const lastCheckElement = document.getElementById('last-check');
+
+                    console.log('All elements found:', {
+                        rakStatusElement: !!rakStatusElement,
+                        approtectElement: !!approtectElement,
+                        deviceIdElement: !!deviceIdElement
+                    });
 
                     if (data.connected) {
+                        console.log('Device is connected, updating fields...');
                         rakStatusElement.innerHTML = '<span class="status-indicator status-online"></span>Connected';
                         swdStatusElement.textContent = 'Connected';
                         powerStatusElement.textContent = 'On';
 
-                        // Update additional info if available
+                        // APPROTECT status with color coding
                         if (data.approtect_status) {
-                            swdStatusElement.textContent += ` (${data.approtect_status.includes('ENABLED') ? 'Protected' : 'Open'})`;
+                            if (data.approtect_status.includes('ENABLED')) {
+                                approtectElement.innerHTML = '<span style="color: #dc3545;">🔒 ' + data.approtect_status + '</span>';
+                            } else if (data.approtect_status.includes('Disabled')) {
+                                approtectElement.innerHTML = '<span style="color: #28a745;">🔓 ' + data.approtect_status + '</span>';
+                            } else {
+                                approtectElement.textContent = data.approtect_status;
+                            }
                         }
+
+                        // Device information
+                        if (data.device_id) {
+                            deviceIdElement.textContent = data.device_id;
+                        }
+
+                        if (data.flash_size) {
+                            flashSizeElement.textContent = (data.flash_size / 1024) + ' KB';
+                        }
+
+                        if (data.ram_size) {
+                            ramSizeElement.textContent = (data.ram_size / 1024) + ' KB';
+                        }
+
+                        // Core state
+                        if (data.core_halted !== undefined) {
+                            coreStateElement.innerHTML = data.core_halted ?
+                                '<span style="color: #dc3545;">⏸️ Halted</span>' :
+                                '<span style="color: #28a745;">▶️ Running</span>';
+                        }
+
+                        // NVMC state
+                        if (data.nvmc_state && data.nvmc_ready !== undefined) {
+                            const ready = data.nvmc_ready ? '✅' : '⏳';
+                            nvmcStateElement.textContent = ready + ' ' + data.nvmc_state;
+                        }
+
                     } else {
                         rakStatusElement.innerHTML = '<span class="status-indicator status-offline"></span>Disconnected';
                         swdStatusElement.textContent = 'Disconnected';
                         powerStatusElement.textContent = 'Unknown';
+                        approtectElement.textContent = 'Unknown';
+                        deviceIdElement.textContent = 'Unknown';
+                        flashSizeElement.textContent = 'Unknown';
+                        ramSizeElement.textContent = 'Unknown';
+                        coreStateElement.textContent = 'Unknown';
+                        nvmcStateElement.textContent = 'Unknown';
                     }
 
                     btStatusElement.textContent = 'Disconnected'; // TODO: Implement BT status
+                    lastCheckElement.textContent = new Date().toLocaleTimeString();
                 })
                 .catch(err => {
-                    console.warn('Could not check SWD status:', err);
-                    document.getElementById('rak-status').innerHTML = '<span class="status-indicator status-unknown"></span>Unknown';
+                    console.error('Could not check SWD status:', err);
+                    console.error('Error details:', err.message);
+
+                    // Update all fields to show error state
+                    document.getElementById('rak-status').innerHTML = '<span class="status-indicator status-unknown"></span>Connection Error';
+                    document.getElementById('swd-status').textContent = 'Error';
+                    document.getElementById('power-status').textContent = 'Unknown';
+                    document.getElementById('approtect-status').textContent = 'Error';
+                    document.getElementById('device-id').textContent = 'Error';
+                    document.getElementById('flash-size').textContent = 'Error';
+                    document.getElementById('ram-size').textContent = 'Error';
+                    document.getElementById('core-state').textContent = 'Error';
+                    document.getElementById('nvmc-state').textContent = 'Error';
+                    document.getElementById('last-check').textContent = new Date().toLocaleTimeString() + ' (Failed: ' + err.message + ')';
                 });
         }
 
@@ -510,50 +612,135 @@ SWD status will appear here after connection check...
         function checkSWD() {
             console.log('Checking SWD status...');
             document.getElementById('protStatus').innerText = 'Checking SWD...';
-            document.getElementById('swdRegisterDump').textContent = 'Fetching SWD status...';
+            document.getElementById('swdRegisterDump').textContent = 'Fetching comprehensive SWD status...';
 
             fetch('/check_swd')
-                .then(r => r.json())
+                .then(r => {
+                    console.log('Flashing page SWD response status:', r.status);
+                    if (!r.ok) {
+                        throw new Error('HTTP ' + r.status + ': ' + r.statusText);
+                    }
+                    return r.json();
+                })
                 .then(data => {
-                    console.log('SWD data received:', data);
-                    let html = '=== SWD Status ===\\n\\n';
+                    console.log('Flashing page SWD data received:', data);
+                    let html = '';
 
                     if (data.connected) {
-                        html += 'Connection: CONNECTED\\n';
-                        html += 'APPROTECT: ' + data.approtect + ' - ' + data.approtect_status + '\\n';
-                        html += 'NVMC Ready: ' + (data.nvmc_ready ? 'YES' : 'NO') + '\\n';
-                        html += 'NVMC State: ' + data.nvmc_state + '\\n';
-                        html += 'Core Halted: ' + (data.core_halted ? 'YES' : 'NO') + '\\n';
+                        // Header with connection status
+                        html += '=== 🔗 SWD CONNECTION STATUS ===\\n';
+                        html += 'Status: CONNECTED\\n';
+                        html += 'Timestamp: ' + new Date().toLocaleString() + '\\n\\n';
 
+                        // Device Information Section
+                        html += '=== 🖥️ DEVICE INFORMATION ===\\n';
                         if (data.device_id) html += 'Device ID: ' + data.device_id + '\\n';
-                        if (data.flash_size) html += 'Flash Size: ' + (data.flash_size / 1024) + ' KB\\n';
-                        if (data.ram_size) html += 'RAM Size: ' + (data.ram_size / 1024) + ' KB\\n';
+                        if (data.flash_size) html += 'Flash Size: ' + (data.flash_size / 1024) + ' KB (' + data.flash_size + ' bytes)\\n';
+                        if (data.ram_size) html += 'RAM Size: ' + (data.ram_size / 1024) + ' KB (' + data.ram_size + ' bytes)\\n';
+                        if (data.bootloader_addr) html += 'Bootloader: ' + data.bootloader_addr + '\\n';
+                        html += '\\n';
 
-                        html += '\\n=== Registers ===\\n';
+                        // Security and Protection Status
+                        html += '=== 🔒 SECURITY STATUS ===\\n';
+                        html += 'APPROTECT: ' + (data.approtect || 'Unknown') + '\\n';
+                        html += 'Status: ' + (data.approtect_status || 'Unknown') + '\\n';
+                        if (data.approtect_status && data.approtect_status.includes('ENABLED')) {
+                            html += '⚠️ WARNING: Device is PROTECTED - Mass erase required for flashing!\\n';
+                        } else if (data.approtect_status && data.approtect_status.includes('Disabled')) {
+                            html += '✅ Device is OPEN for debugging and flashing\\n';
+                        }
+                        html += '\\n';
+
+                        // Core Status
+                        html += '=== ⚙️ CORE STATUS ===\\n';
+                        html += 'Core State: ' + (data.core_halted ? 'HALTED 🛑' : 'RUNNING ▶️') + '\\n';
+                        html += 'NVMC Ready: ' + (data.nvmc_ready ? 'YES ✅' : 'NO ❌') + '\\n';
+                        html += 'NVMC State: ' + (data.nvmc_state || 'Unknown') + '\\n';
+                        html += '\\n';
+
+                        // Detailed Register Dump
+                        html += '=== 📊 DETAILED REGISTER DUMP ===\\n';
                         if (data.registers) {
+                            // NVMC Registers
+                            html += '\\n--- NVMC (Non-Volatile Memory Controller) ---\\n';
+                            if (data.registers.nvmc_ready) html += 'NVMC_READY      : ' + data.registers.nvmc_ready + '\\n';
+                            if (data.registers.nvmc_config) html += 'NVMC_CONFIG     : ' + data.registers.nvmc_config + '\\n';
+
+                            // UICR Registers
+                            html += '\\n--- UICR (User Information Config Registers) ---\\n';
+                            if (data.registers.approtect) html += 'UICR_APPROTECT  : ' + data.registers.approtect + '\\n';
+                            if (data.registers.bootloader_addr) html += 'BOOTLOADER_ADDR : ' + data.registers.bootloader_addr + '\\n';
+
+                            // Debug Registers
+                            html += '\\n--- ARM Debug Registers ---\\n';
+                            if (data.registers.dhcsr) html += 'DHCSR (Debug Control): ' + data.registers.dhcsr + '\\n';
+
+                            // Flash Content Samples
+                            html += '\\n--- Flash Memory Samples ---\\n';
+                            if (data.registers.flash_0x0) html += 'Flash[0x00000]  : ' + data.registers.flash_0x0 + ' (Reset Vector)\\n';
+                            if (data.registers.flash_0x1000) html += 'Flash[0x01000]  : ' + data.registers.flash_0x1000 + '\\n';
+                            if (data.registers.flash_0xF4000) html += 'Flash[0xF4000]  : ' + data.registers.flash_0xF4000 + ' (Near end)\\n';
+
+                            // Any other registers
+                            html += '\\n--- Other Registers ---\\n';
                             for (let key in data.registers) {
-                                html += key.padEnd(20) + ': ' + data.registers[key] + '\\n';
+                                if (!['nvmc_ready', 'nvmc_config', 'approtect', 'bootloader_addr', 'dhcsr',
+                                      'flash_0x0', 'flash_0x1000', 'flash_0xF4000'].includes(key)) {
+                                    html += key.padEnd(16) + ': ' + data.registers[key] + '\\n';
+                                }
                             }
                         } else {
-                            html += 'No register data available\\n';
+                            html += 'No detailed register data available\\n';
                         }
 
-                        document.getElementById('protStatus').innerHTML = '<b style="color:green;">SWD Connected</b>';
+                        html += '\\n=== 💡 STATUS SUMMARY ===\\n';
+                        html += 'Connection: ✅ CONNECTED\\n';
+                        html += 'Debug Access: ' + (data.approtect_status && data.approtect_status.includes('ENABLED') ? '❌ BLOCKED' : '✅ AVAILABLE') + '\\n';
+                        html += 'Flash Ready: ' + (data.nvmc_ready ? '✅ YES' : '❌ NO') + '\\n';
+                        html += 'Recommended Action: ';
                         if (data.approtect_status && data.approtect_status.includes('ENABLED')) {
-                            document.getElementById('protStatus').innerHTML += ' - <span style="color:red;">PROTECTION ENABLED</span>';
+                            html += 'Perform Mass Erase to unlock device\\n';
+                        } else {
+                            html += 'Device ready for flashing operations\\n';
                         }
+
+                        // Update status display
+                        document.getElementById('protStatus').innerHTML = '<b style="color:green;">🔗 SWD Connected</b>';
+                        if (data.approtect_status && data.approtect_status.includes('ENABLED')) {
+                            document.getElementById('protStatus').innerHTML += ' - <span style="color:red;">🔒 PROTECTION ENABLED</span>';
+                        } else {
+                            document.getElementById('protStatus').innerHTML += ' - <span style="color:green;">🔓 DEBUG READY</span>';
+                        }
+
                     } else {
-                        html += 'Connection: DISCONNECTED\\n';
-                        if (data.error) html += 'Error: ' + data.error + '\\n';
-                        document.getElementById('protStatus').innerHTML = '<b style="color:red;">SWD Disconnected</b>';
+                        html += '=== ❌ SWD CONNECTION FAILED ===\\n\\n';
+                        html += 'Status: DISCONNECTED\\n';
+                        html += 'Timestamp: ' + new Date().toLocaleString() + '\\n';
+                        if (data.error) html += 'Error Details: ' + data.error + '\\n';
+                        html += '\\n=== 🔧 TROUBLESHOOTING ===\\n';
+                        html += '1. Check physical SWD connections (SWCLK, SWDIO, GND)\\n';
+                        html += '2. Verify target power is ON\\n';
+                        html += '3. Check for correct voltage levels (3.3V)\\n';
+                        html += '4. Ensure target is not in deep sleep mode\\n';
+                        html += '5. Try power cycling the target device\\n';
+
+                        document.getElementById('protStatus').innerHTML = '<b style="color:red;">❌ SWD Disconnected</b>';
                     }
 
                     document.getElementById('swdRegisterDump').textContent = html;
                 })
                 .catch(err => {
                     console.error('SWD check error:', err);
-                    document.getElementById('protStatus').innerText = 'Error checking SWD';
-                    document.getElementById('swdRegisterDump').textContent = 'Error fetching SWD status: ' + err;
+                    document.getElementById('protStatus').innerHTML = '<b style="color:red;">⚠️ SWD Check Error</b>';
+                    document.getElementById('swdRegisterDump').textContent =
+                        '=== ⚠️ ERROR FETCHING SWD STATUS ===\\n\\n' +
+                        'Error: ' + err + '\\n\\n' +
+                        'This could indicate:\\n' +
+                        '• Network connectivity issues\\n' +
+                        '• ESP32 firmware problems\\n' +
+                        '• SWD hardware failure\\n' +
+                        '• Target device issues\\n\\n' +
+                        'Try refreshing the page or checking connections.';
                 });
         }
 
@@ -759,6 +946,12 @@ SWD status will appear here after connection check...
         document.addEventListener('DOMContentLoaded', function() {
             console.log('Page loaded, initializing...');
             refreshStatus();
+
+            // Set up periodic RAK status updates every 10 seconds
+            setInterval(() => {
+                console.log('Periodic RAK status update...');
+                checkSWDForHome();
+            }, 10000);
         });
     </script>
 </body>

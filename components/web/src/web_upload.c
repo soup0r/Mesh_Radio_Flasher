@@ -40,9 +40,9 @@ static esp_err_t ensure_swd_ready(void) {
         ESP_LOGI(TAG, "Reinitializing SWD for operation...");
         
         swd_config_t swd_cfg = {
-            .pin_swclk = 8,
-            .pin_swdio = 9,
-            .pin_reset = 7,
+            .pin_swclk = 4,  // ESP32C3 GPIO4
+            .pin_swdio = 3,  // ESP32C3 GPIO3
+            .pin_reset = 5,  // ESP32C3 GPIO5
             .delay_cycles = 0
         };
         

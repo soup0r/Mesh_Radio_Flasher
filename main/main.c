@@ -26,6 +26,13 @@
 #include "power_mgmt.h"
 #include "flash_safety.h"
 
+#ifdef CONFIG_IDF_TARGET_ESP32C3
+#define BT_PROXY_SUPPORTED 0
+#warning "Bluetooth proxy not supported on ESP32C3"
+#else
+#define BT_PROXY_SUPPORTED 1
+#endif
+
 static const char *TAG = "FLASHER";
 
 // Event group for system state
@@ -559,9 +566,9 @@ static esp_err_t try_swd_connection(void) {
         ESP_LOGI(TAG, "Initializing SWD interface...");
         
         swd_config_t swd_cfg = {
-            .pin_swclk = 8,
-            .pin_swdio = 9,
-            .pin_reset = 7,
+            .pin_swclk = 4,  // ESP32C3 GPIO4
+            .pin_swdio = 3,  // ESP32C3 GPIO3
+            .pin_reset = 5,  // ESP32C3 GPIO5
             .delay_cycles = 0
         };
         

@@ -5,14 +5,30 @@
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "soc/gpio_struct.h"
+#ifdef CONFIG_IDF_TARGET_ESP32C3
+#include "soc/gpio_reg.h"
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 static const char *TAG = "SWD_CORE";
 
-// GPIO fast access macros
+// GPIO fast access macros - ESP32C3 has 32-bit registers vs ESP32S3 64-bit
+#ifdef CONFIG_IDF_TARGET_ESP32C3
 #define SWCLK_MASK (1UL << config.pin_swclk)
 #define SWDIO_MASK (1UL << config.pin_swdio)
+
+#define SWCLK_H()    REG_WRITE(GPIO_OUT_W1TS_REG, SWCLK_MASK)
+#define SWCLK_L()    REG_WRITE(GPIO_OUT_W1TC_REG, SWCLK_MASK)
+#define SWDIO_H()    REG_WRITE(GPIO_OUT_W1TS_REG, SWDIO_MASK)
+#define SWDIO_L()    REG_WRITE(GPIO_OUT_W1TC_REG, SWDIO_MASK)
+#define SWDIO_DRIVE()   REG_WRITE(GPIO_ENABLE_W1TS_REG, SWDIO_MASK)
+#define SWDIO_RELEASE() REG_WRITE(GPIO_ENABLE_W1TC_REG, SWDIO_MASK)
+#define READ_SWDIO()    ((REG_READ(GPIO_IN_REG) & SWDIO_MASK) != 0)
+#else
+// ESP32/ESP32S3 version with 64-bit registers
+#define SWCLK_MASK (1ULL << config.pin_swclk)
+#define SWDIO_MASK (1ULL << config.pin_swdio)
 
 #define SWCLK_H()    GPIO.out_w1ts = SWCLK_MASK
 #define SWCLK_L()    GPIO.out_w1tc = SWCLK_MASK
@@ -21,6 +37,7 @@ static const char *TAG = "SWD_CORE";
 #define SWDIO_DRIVE()   GPIO.enable_w1ts = SWDIO_MASK
 #define SWDIO_RELEASE() GPIO.enable_w1tc = SWDIO_MASK
 #define READ_SWDIO()    ((GPIO.in & SWDIO_MASK) != 0)
+#endif
 
 // Configuration storage
 static swd_config_t config = {0};
