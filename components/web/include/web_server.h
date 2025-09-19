@@ -12,6 +12,7 @@ esp_err_t web_server_stop(void);
 esp_err_t register_swd_handlers(httpd_handle_t server);
 esp_err_t register_flash_handlers(httpd_handle_t server);
 esp_err_t register_system_handlers(httpd_handle_t server);
+esp_err_t register_power_handlers(httpd_handle_t server);
 
 // WebSocket support for real-time updates
 typedef void (*ws_callback_t)(const char *data, size_t len);

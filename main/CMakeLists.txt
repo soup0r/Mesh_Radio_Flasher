@@ -1,12 +1,12 @@
 idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
-    REQUIRES 
-        swd 
-        power 
-        safety 
+    REQUIRES
+        swd
+        power
+        safety
         web
-        hex 
+        hex
         utils
         nvs_flash
         esp_wifi
