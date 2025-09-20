@@ -46,6 +46,29 @@ esp_err_t power_target_on(void);
 esp_err_t power_target_off(void);
 esp_err_t power_target_reset(void);
 esp_err_t power_target_cycle(uint32_t off_time_ms);
+// Get current power status
+bool power_target_is_on(void);
+// Prepare for deep sleep (hold GPIO state)
+void power_prepare_for_sleep(void);
+// Restore after wake from deep sleep
+void power_restore_after_sleep(void);
+
+// Battery monitoring
+typedef struct {
+    float voltage;
+    float voltage_min;
+    float voltage_max;
+    float percentage;
+    bool is_charging;
+    bool is_low;
+    bool is_critical;
+    uint32_t samples_count;
+    float voltage_avg;
+} battery_status_t;
+
+esp_err_t power_battery_init(void);
+esp_err_t power_get_battery_status(battery_status_t *status);
+float power_get_battery_voltage_real(void);
 
 // Deep sleep management
 esp_err_t power_enter_deep_sleep(uint32_t duration_sec);

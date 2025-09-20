@@ -5,6 +5,57 @@
 
 static const char *TAG = "WEB_HANDLERS";
 
+// Power status handler
+static esp_err_t power_status_handler(httpd_req_t *req) {
+    bool is_powered = power_target_is_on();
+    ESP_LOGI(TAG, "Power status request: %s", is_powered ? "ON" : "OFF");
+    cJSON *json = cJSON_CreateObject();
+    cJSON_AddBoolToObject(json, "success", true);
+    cJSON_AddBoolToObject(json, "powered", is_powered);
+    cJSON_AddStringToObject(json, "status", is_powered ? "ON" : "OFF");
+    char *json_string = cJSON_Print(json);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_string, strlen(json_string));
+    free(json_string);
+    cJSON_Delete(json);
+    return ESP_OK;
+}
+
+static esp_err_t battery_status_handler(httpd_req_t *req) {
+    battery_status_t battery;
+    esp_err_t ret = power_get_battery_status(&battery);
+    cJSON *json = cJSON_CreateObject();
+    if (ret == ESP_OK) {
+        cJSON_AddBoolToObject(json, "success", true);
+        cJSON_AddNumberToObject(json, "voltage", battery.voltage);
+        cJSON_AddNumberToObject(json, "voltage_min", battery.voltage_min);
+        cJSON_AddNumberToObject(json, "voltage_max", battery.voltage_max);
+        cJSON_AddNumberToObject(json, "percentage", battery.percentage);
+        cJSON_AddNumberToObject(json, "voltage_avg", battery.voltage_avg);
+        cJSON_AddBoolToObject(json, "is_charging", battery.is_charging);
+        cJSON_AddBoolToObject(json, "is_low", battery.is_low);
+        cJSON_AddBoolToObject(json, "is_critical", battery.is_critical);
+        cJSON_AddNumberToObject(json, "samples", battery.samples_count);
+        const char *status_text = "Normal";
+        if (battery.is_critical) status_text = "Critical";
+        else if (battery.is_low) status_text = "Low";
+        else if (battery.is_charging) status_text = "Charging";
+        else if (battery.percentage > 90) status_text = "Full";
+        cJSON_AddStringToObject(json, "status_text", status_text);
+        ESP_LOGI(TAG, "Battery status: %.2fV (%.0f%%) %s",
+                battery.voltage, battery.percentage, status_text);
+    } else {
+        cJSON_AddBoolToObject(json, "success", false);
+        cJSON_AddStringToObject(json, "error", "Battery monitoring not available");
+    }
+    char *json_string = cJSON_Print(json);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_string, strlen(json_string));
+    free(json_string);
+    cJSON_Delete(json);
+    return ESP_OK;
+}
+
 // Power control handlers
 static esp_err_t power_on_handler(httpd_req_t *req) {
     ESP_LOGI(TAG, "Power on request");
@@ -115,6 +166,13 @@ static esp_err_t power_cycle_handler(httpd_req_t *req) {
 }
 
 esp_err_t register_power_handlers(httpd_handle_t server) {
+    httpd_uri_t power_status_uri = {
+        .uri = "/power_status",
+        .method = HTTP_GET,
+        .handler = power_status_handler,
+        .user_ctx = NULL
+    };
+
     httpd_uri_t power_on_uri = {
         .uri = "/power_on",
         .method = HTTP_POST,
@@ -143,6 +201,15 @@ esp_err_t register_power_handlers(httpd_handle_t server) {
         .user_ctx = NULL
     };
 
+    httpd_uri_t battery_status_uri = {
+        .uri = "/battery_status",
+        .method = HTTP_GET,
+        .handler = battery_status_handler,
+        .user_ctx = NULL
+    };
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &battery_status_uri));
+
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &power_status_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &power_on_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &power_off_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &power_reboot_uri));
