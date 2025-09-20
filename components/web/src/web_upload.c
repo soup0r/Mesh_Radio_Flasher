@@ -248,17 +248,17 @@ static void dump_nrf52_registers(char *buffer, size_t max_len) {
 
 // Check SWD connection handler
 esp_err_t check_swd_handler(httpd_req_t *req) {
-    char resp[2048];
+    char resp[4096];  // Increased buffer size
     ESP_LOGI(TAG, "=== SWD Status Check Requested ===");
-    
+
     // Check and try to reconnect if needed
     esp_err_t ret = ensure_swd_ready();
     bool connected = (ret == ESP_OK);
-    
+
     if (connected) {
         ESP_LOGI(TAG, "SWD Connected - Reading registers...");
         ESP_LOGI(TAG, "=== NRF52 Register Dump ===");
-        
+
         // Read all important registers
         uint32_t nvmc_ready = 0, nvmc_readynext = 0, nvmc_config = 0;
         uint32_t approtect = 0, bootloader_addr = 0, nrffw0 = 0, nrffw1 = 0;
@@ -266,74 +266,74 @@ esp_err_t check_swd_handler(httpd_req_t *req) {
         uint32_t info_part = 0, info_variant = 0, info_ram = 0, info_flash = 0;
         uint32_t dhcsr = 0, demcr = 0;
         uint32_t flash_0x0 = 0, flash_0x1000 = 0, flash_0xF4000 = 0;
-        
+
         // NVMC registers
         swd_mem_read32(NVMC_READY, &nvmc_ready);
         ESP_LOGI(TAG, "NVMC_READY: 0x%08lX", nvmc_ready);
-        
+
         swd_mem_read32(NVMC_READYNEXT, &nvmc_readynext);
         ESP_LOGI(TAG, "NVMC_READYNEXT: 0x%08lX", nvmc_readynext);
-        
+
         swd_mem_read32(NVMC_CONFIG, &nvmc_config);
         ESP_LOGI(TAG, "NVMC_CONFIG: 0x%08lX", nvmc_config);
-        
+
         // UICR registers
         swd_mem_read32(UICR_APPROTECT, &approtect);
         ESP_LOGI(TAG, "UICR_APPROTECT: 0x%08lX", approtect);
-        
+
         swd_mem_read32(UICR_BOOTLOADERADDR, &bootloader_addr);
         ESP_LOGI(TAG, "UICR_BOOTLOADERADDR: 0x%08lX", bootloader_addr);
-        
+
         swd_mem_read32(UICR_NRFFW0, &nrffw0);
         ESP_LOGI(TAG, "UICR_NRFFW0: 0x%08lX", nrffw0);
-        
+
         swd_mem_read32(UICR_NRFFW1, &nrffw1);
         ESP_LOGI(TAG, "UICR_NRFFW1: 0x%08lX", nrffw1);
-        
+
         // FICR registers
         swd_mem_read32(FICR_CODEPAGESIZE, &codepagesize);
         ESP_LOGI(TAG, "FICR_CODEPAGESIZE: 0x%08lX", codepagesize);
-        
+
         swd_mem_read32(FICR_CODESIZE, &codesize);
         ESP_LOGI(TAG, "FICR_CODESIZE: 0x%08lX", codesize);
-        
+
         swd_mem_read32(FICR_DEVICEID0, &deviceid0);
         ESP_LOGI(TAG, "FICR_DEVICEID0: 0x%08lX", deviceid0);
-        
+
         swd_mem_read32(FICR_DEVICEID1, &deviceid1);
         ESP_LOGI(TAG, "FICR_DEVICEID1: 0x%08lX", deviceid1);
-        
+
         swd_mem_read32(FICR_INFO_PART, &info_part);
         ESP_LOGI(TAG, "FICR_INFO_PART: 0x%08lX", info_part);
-        
+
         swd_mem_read32(FICR_INFO_VARIANT, &info_variant);
         ESP_LOGI(TAG, "FICR_INFO_VARIANT: 0x%08lX", info_variant);
-        
+
         swd_mem_read32(FICR_INFO_RAM, &info_ram);
         ESP_LOGI(TAG, "FICR_INFO_RAM: 0x%08lX", info_ram);
-        
+
         swd_mem_read32(FICR_INFO_FLASH, &info_flash);
         ESP_LOGI(TAG, "FICR_INFO_FLASH: 0x%08lX", info_flash);
-        
+
         // Debug registers
         swd_mem_read32(DHCSR_ADDR, &dhcsr);
         ESP_LOGI(TAG, "DHCSR: 0x%08lX", dhcsr);
-        
+
         swd_mem_read32(DEMCR_ADDR, &demcr);
         ESP_LOGI(TAG, "DEMCR: 0x%08lX", demcr);
-        
+
         // Flash content samples
         swd_mem_read32(0x00000000, &flash_0x0);
         ESP_LOGI(TAG, "Flash[0x0000]: 0x%08lX", flash_0x0);
-        
+
         swd_mem_read32(0x00001000, &flash_0x1000);
         ESP_LOGI(TAG, "Flash[0x1000]: 0x%08lX", flash_0x1000);
-        
+
         swd_mem_read32(0x000F4000, &flash_0xF4000);
         ESP_LOGI(TAG, "Flash[0xF4000]: 0x%08lX", flash_0xF4000);
-        
+
         ESP_LOGI(TAG, "=== Register Dump Complete ===");
-        
+
         // Determine APPROTECT status string
         const char *approtect_status;
         if (approtect == 0xFFFFFFFF) {
@@ -345,7 +345,7 @@ esp_err_t check_swd_handler(httpd_req_t *req) {
         } else {
             approtect_status = "Unknown/Custom value";
         }
-        
+
         // Determine NVMC state
         const char *nvmc_state;
         if ((nvmc_config & 0x3) == 0x00) {
@@ -357,11 +357,11 @@ esp_err_t check_swd_handler(httpd_req_t *req) {
         } else {
             nvmc_state = "Unknown";
         }
-        
+
         // Check if core is halted
         bool core_halted = (dhcsr & DHCSR_S_HALT) != 0;
-        
-        // Build JSON response with all register data
+
+        // Build JSON response with ALL register data
         snprintf(resp, sizeof(resp),
             "{"
             "\"connected\":true,"
@@ -377,10 +377,22 @@ esp_err_t check_swd_handler(httpd_req_t *req) {
             "\"ram_size\":%lu,"
             "\"registers\":{"
                 "\"nvmc_ready\":\"0x%08lX\","
+                "\"nvmc_readynext\":\"0x%08lX\","
                 "\"nvmc_config\":\"0x%08lX\","
                 "\"approtect\":\"0x%08lX\","
                 "\"bootloader_addr\":\"0x%08lX\","
+                "\"nrffw0\":\"0x%08lX\","
+                "\"nrffw1\":\"0x%08lX\","
+                "\"codepagesize\":\"0x%08lX\","
+                "\"codesize\":\"0x%08lX\","
+                "\"deviceid0\":\"0x%08lX\","
+                "\"deviceid1\":\"0x%08lX\","
+                "\"info_part\":\"0x%08lX\","
+                "\"info_variant\":\"0x%08lX\","
+                "\"info_ram\":\"0x%08lX\","
+                "\"info_flash\":\"0x%08lX\","
                 "\"dhcsr\":\"0x%08lX\","
+                "\"demcr\":\"0x%08lX\","
                 "\"flash_0x0\":\"0x%08lX\","
                 "\"flash_0x1000\":\"0x%08lX\","
                 "\"flash_0xF4000\":\"0x%08lX\""
@@ -393,32 +405,44 @@ esp_err_t check_swd_handler(httpd_req_t *req) {
             core_halted ? "true" : "false",
             bootloader_addr,
             deviceid1, deviceid0,
-            info_flash * 1024UL,  // Convert from KB to bytes
-            info_ram * 1024UL,     // Convert from KB to bytes
+            info_flash * 1024UL,
+            info_ram * 1024UL,
             nvmc_ready,
+            nvmc_readynext,
             nvmc_config,
             approtect,
             bootloader_addr,
+            nrffw0,
+            nrffw1,
+            codepagesize,
+            codesize,
+            deviceid0,
+            deviceid1,
+            info_part,
+            info_variant,
+            info_ram,
+            info_flash,
             dhcsr,
+            demcr,
             flash_0x0,
             flash_0x1000,
             flash_0xF4000
         );
-        
+
     } else {
         ESP_LOGE(TAG, "SWD Not Connected");
         snprintf(resp, sizeof(resp),
             "{\"connected\":false,\"status\":\"Disconnected\",\"error\":\"%s\"}",
             esp_err_to_name(ret));
     }
-    
+
     if (connected) {
         ESP_LOGI(TAG, "Status check complete, releasing SWD...");
         swd_shutdown();
     }
 
     ESP_LOGI(TAG, "=== SWD Status Check Complete ===");
-    
+
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, strlen(resp));
     return ESP_OK;

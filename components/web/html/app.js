@@ -1,2 +1,2 @@
-// RAK4631 Flasher Web App
-console.log("RAK4631 Flasher initialized");
+// Mesh Radio Flasher Web App
+console.log("Mesh Radio Flasher initialized");

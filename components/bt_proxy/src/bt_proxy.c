@@ -1,4 +1,4 @@
-// bt_proxy.c - Bluetooth to WiFi Proxy for RAK4631
+// bt_proxy.c - Bluetooth to WiFi Proxy for mesh radios
 #ifdef CONFIG_IDF_TARGET_ESP32C3
 // ESP32C3 doesn't support Bluedroid - stub implementation
 #warning "Bluetooth proxy not available on ESP32C3"
@@ -34,7 +34,7 @@ void bt_proxy_set_target_name(const char *name) {}
 
 static const char *TAG = "BT_PROXY";
 
-// Nordic UART Service (NUS) UUIDs - commonly used by RAK4631
+// Nordic UART Service (NUS) UUIDs - commonly used by mesh radios
 #define NUS_SERVICE_UUID        "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define NUS_TX_CHAR_UUID        "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"  // Nordic TX (we receive)
 #define NUS_RX_CHAR_UUID        "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"  // Nordic RX (we send)
@@ -57,8 +57,8 @@ typedef struct {
     esp_gatt_if_t gattc_if;
     uint16_t service_start_handle;
     uint16_t service_end_handle;
-    uint16_t tx_char_handle;  // Handle for receiving from RAK
-    uint16_t rx_char_handle;  // Handle for sending to RAK
+    uint16_t tx_char_handle;  // Handle for receiving from radio
+    uint16_t rx_char_handle;  // Handle for sending to radio
     uint16_t tx_descr_handle; // For enabling notifications
     bool is_connected;
     ble_state_t state;
@@ -127,7 +127,7 @@ static void forward_ble_to_tcp(const uint8_t *data, uint16_t len) {
     xSemaphoreGive(proxy.tcp.mutex);
 }
 
-// Send data to RAK4631 via BLE
+// Send data to mesh radio via BLE
 static esp_err_t send_to_ble(const uint8_t *data, uint16_t len) {
     if (proxy.ble.state != BLE_STATE_READY || !proxy.ble.is_connected) {
         ESP_LOGW(TAG, "BLE not ready for sending");
@@ -172,7 +172,7 @@ static esp_err_t send_to_ble(const uint8_t *data, uint16_t len) {
 static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
     switch (event) {
         case ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT:
-            ESP_LOGI(TAG, "Scan parameters set, starting scan for RAK4631...");
+            ESP_LOGI(TAG, "Scan parameters set, starting scan for mesh radios...");
             esp_ble_gap_start_scanning(30);  // Scan for 30 seconds
             break;
             
@@ -201,8 +201,8 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
                 if (adv_name) {
                     memcpy(name, adv_name, adv_name_len < 31 ? adv_name_len : 31);
                     
-                    // Check if this is our target RAK4631
-                    if (strstr(name, proxy.target_name) || strstr(name, "RAK")) {
+                    // Check if this is our target mesh radio
+                    if (strstr(name, proxy.target_name) || strstr(name, "MESH")) {
                         ESP_LOGI(TAG, "Found target device: %s", name);
                         ESP_LOGI(TAG, "Address: %02X:%02X:%02X:%02X:%02X:%02X",
                                 scan_result->scan_rst.bda[0], scan_result->scan_rst.bda[1],
@@ -371,7 +371,7 @@ static void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_
             break;
             
         case ESP_GATTC_NOTIFY_EVT:
-            // Received data from RAK4631
+            // Received data from mesh radio
             ESP_LOGD(TAG, "Received %d bytes from BLE", param->notify.value_len);
             forward_ble_to_tcp(param->notify.value, param->notify.value_len);
             break;
@@ -503,8 +503,8 @@ static void tcp_server_task(void *arg) {
                     
                     // Send status message
                     const char *msg = proxy.ble.is_connected ? 
-                        "BLE Proxy Connected to RAK4631\r\n" : 
-                        "BLE Proxy - RAK4631 Not Connected\r\n";
+                        "BLE Proxy Connected to mesh radio\r\n" : 
+                        "BLE Proxy - mesh radio Not Connected\r\n";
                     send(client_sock, msg, strlen(msg), 0);
                     break;
                 }
@@ -535,7 +535,7 @@ esp_err_t bt_proxy_init(uint16_t tcp_port) {
     memset(&proxy, 0, sizeof(proxy_state_t));
     proxy.tcp.port = tcp_port;
     proxy.auto_reconnect = true;
-    strcpy(proxy.target_name, "RAK");  // Default search pattern
+    strcpy(proxy.target_name, "MESH");  // Default search pattern
     
     // Create mutex
     proxy.tcp.mutex = xSemaphoreCreateMutex();
@@ -611,7 +611,7 @@ esp_err_t bt_proxy_init(uint16_t tcp_port) {
     return ESP_OK;
 }
 
-// Scan and connect to RAK4631
+// Scan and connect to mesh radio
 esp_err_t bt_proxy_scan_and_connect(const char *device_name) {
     if (device_name) {
         strncpy(proxy.target_name, device_name, sizeof(proxy.target_name) - 1);
@@ -665,7 +665,7 @@ esp_err_t bt_proxy_disconnect(void) {
     return ESP_ERR_INVALID_STATE;
 }
 
-// Send command to RAK4631
+// Send command to mesh radio
 esp_err_t bt_proxy_send_command(const char *command) {
     if (!command) {
         return ESP_ERR_INVALID_ARG;

@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>RAK4631 Field Flasher</title>
+    <title>Mesh Radio Flasher</title>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
@@ -228,7 +228,7 @@
 <body>
     <div class="container">
         <header>
-            <h1>RAK4631 Field Flasher</h1>
+            <h1>Mesh Radio Flasher</h1>
             <p class="subtitle">Wireless Development & Power Management Interface</p>
         </header>
 
@@ -272,10 +272,10 @@
                     </div>
 
                     <div class="info-card">
-                        <h3>RAK4631 Target</h3>
+                        <h3>Target Radio</h3>
                         <div class="info-item">
                             <span class="info-label">Connection:</span>
-                            <span class="info-value" id="rak-status"><span class="status-indicator status-unknown"></span>Checking...</span>
+                            <span class="info-value" id="radio-status"><span class="status-indicator status-unknown"></span>Checking...</span>
                         </div>
                         <div class="info-item">
                             <span class="info-label">SWD Interface:</span>
@@ -350,7 +350,7 @@
 
                 <div class="info-card">
                     <h3>Target Power Management</h3>
-                    <p>Control power to the RAK4631 target device using MOSFET switching.<br>
+                    <p>Control power to the target mesh radio device using MOSFET switching.<br>
                     Power is normally on, with GPIO control to interrupt power.</p>
 
                     <div style="margin: 20px 0;">
@@ -383,7 +383,7 @@
             </div>
 
             <div id="flashing" class="tab-pane">
-                <h2>📱 RAK4631 Flashing</h2>
+                <h2>📱 Mesh Radio Flashing</h2>
 
                 <div class="info-card">
                     <h3>SWD Debug Status</h3>
@@ -493,7 +493,7 @@ SWD status will appear here after connection check...
                 document.getElementById('wifi-rssi').textContent = '-' + (Math.floor(Math.random() * 30) + 40) + ' dBm';
             }, 500);
 
-            // Check SWD status for RAK info
+            // Check SWD status for radio info
             checkSWDForHome();
         }
 
@@ -514,7 +514,7 @@ SWD status will appear here after connection check...
                     console.log('data.approtect_status:', data.approtect_status);
                     console.log('data.device_id:', data.device_id);
 
-                    const rakStatusElement = document.getElementById('rak-status');
+                    const radioStatusElement = document.getElementById('radio-status');
                     const swdStatusElement = document.getElementById('swd-status');
                     const powerStatusElement = document.getElementById('power-status');
                     const approtectElement = document.getElementById('approtect-status');
@@ -527,14 +527,14 @@ SWD status will appear here after connection check...
                     const lastCheckElement = document.getElementById('last-check');
 
                     console.log('All elements found:', {
-                        rakStatusElement: !!rakStatusElement,
+                        radioStatusElement: !!radioStatusElement,
                         approtectElement: !!approtectElement,
                         deviceIdElement: !!deviceIdElement
                     });
 
                     if (data.connected) {
                         console.log('Device is connected, updating fields...');
-                        rakStatusElement.innerHTML = '<span class="status-indicator status-online"></span>Connected';
+                        radioStatusElement.innerHTML = '<span class="status-indicator status-online"></span>Connected';
                         swdStatusElement.textContent = 'Connected';
                         powerStatusElement.textContent = 'On';
 
@@ -576,7 +576,7 @@ SWD status will appear here after connection check...
                         }
 
                     } else {
-                        rakStatusElement.innerHTML = '<span class="status-indicator status-offline"></span>Disconnected';
+                        radioStatusElement.innerHTML = '<span class="status-indicator status-offline"></span>Disconnected';
                         swdStatusElement.textContent = 'Disconnected';
                         powerStatusElement.textContent = 'Unknown';
                         approtectElement.textContent = 'Unknown';
@@ -595,7 +595,7 @@ SWD status will appear here after connection check...
                     console.error('Error details:', err.message);
 
                     // Update all fields to show error state
-                    document.getElementById('rak-status').innerHTML = '<span class="status-indicator status-unknown"></span>Connection Error';
+                    document.getElementById('radio-status').innerHTML = '<span class="status-indicator status-unknown"></span>Connection Error';
                     document.getElementById('swd-status').textContent = 'Error';
                     document.getElementById('power-status').textContent = 'Unknown';
                     document.getElementById('approtect-status').textContent = 'Error';
@@ -947,9 +947,9 @@ SWD status will appear here after connection check...
             console.log('Page loaded, initializing...');
             refreshStatus();
 
-            // Set up periodic RAK status updates every 10 seconds
+            // Set up periodic radio status updates every 10 seconds
             setInterval(() => {
-                console.log('Periodic RAK status update...');
+                console.log('Periodic radio status update...');
                 checkSWDForHome();
             }, 10000);
         });

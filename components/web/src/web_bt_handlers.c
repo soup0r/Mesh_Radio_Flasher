@@ -34,7 +34,7 @@ static esp_err_t bt_status_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// POST /api/bt/scan - Start scanning for RAK4631
+// POST /api/bt/scan - Start scanning for mesh radios
 static esp_err_t bt_scan_handler(httpd_req_t *req) {
     char content[100];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
@@ -51,7 +51,7 @@ static esp_err_t bt_scan_handler(httpd_req_t *req) {
         return ESP_OK;
     }
     
-    const char *device_name = "RAK";  // Default
+    const char *device_name = "MESH";  // Default
     cJSON *name_item = cJSON_GetObjectItem(json, "device_name");
     if (name_item && cJSON_IsString(name_item)) {
         device_name = name_item->valuestring;
@@ -98,7 +98,7 @@ static esp_err_t bt_disconnect_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// POST /api/bt/send - Send data to RAK4631 via BLE
+// POST /api/bt/send - Send data to mesh radio via BLE
 static esp_err_t bt_send_handler(httpd_req_t *req) {
     char content[256];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
