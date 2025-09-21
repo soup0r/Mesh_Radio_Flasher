@@ -26,12 +26,6 @@
 #include "power_mgmt.h"
 #include "flash_safety.h"
 
-#ifdef CONFIG_IDF_TARGET_ESP32C3
-#define BT_PROXY_SUPPORTED 0
-#warning "Bluetooth proxy not supported on ESP32C3"
-#else
-#define BT_PROXY_SUPPORTED 1
-#endif
 
 static const char *TAG = "FLASHER";
 

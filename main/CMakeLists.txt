@@ -10,7 +10,6 @@ idf_component_register(
         utils
         nvs_flash
         esp_wifi
-        bt
         driver
         freertos
         esp_timer
