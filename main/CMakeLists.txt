@@ -8,6 +8,7 @@ idf_component_register(
         web
         hex
         utils
+        ble_proxy
         nvs_flash
         esp_wifi
         driver

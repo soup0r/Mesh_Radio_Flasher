@@ -25,6 +25,7 @@
 #include "swd_flash.h"
 #include "power_mgmt.h"
 #include "flash_safety.h"
+#include "ble_proxy.h"
 
 
 static const char *TAG = "FLASHER";
@@ -1046,6 +1047,60 @@ static void handle_critical_error(const char *context, esp_err_t error) {
     }
 }
 
+// BLE scan task - runs periodic scans
+static void ble_scan_task(void *arg) {
+    ESP_LOGI(TAG, "=== BLE scan task started ===");
+
+    // Wait a bit for system to stabilize
+    ESP_LOGI(TAG, "BLE task waiting 5 seconds for system to stabilize...");
+    vTaskDelay(pdMS_TO_TICKS(5000));
+
+    int scan_count = 0;
+
+    while (1) {
+        scan_count++;
+        ESP_LOGI(TAG, "=== BLE Scan #%d starting ===", scan_count);
+
+        // Start a 5-second scan
+        esp_err_t ret = ble_proxy_start_scan(5);
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "✅ BLE scan #%d started successfully", scan_count);
+
+            // Wait for scan to complete
+            vTaskDelay(pdMS_TO_TICKS(6000));
+
+            // Report results
+            uint16_t count = ble_proxy_get_device_count();
+            ESP_LOGI(TAG, "📱 BLE scan #%d found %d devices", scan_count, count);
+
+            if (count > 0) {
+                ble_device_info_t devices[10];
+                uint16_t retrieved = ble_proxy_get_devices(devices, 10);
+
+                ESP_LOGI(TAG, "=== Device List ===");
+                for (int i = 0; i < retrieved; i++) {
+                    ESP_LOGI(TAG, "  Device %d: %02X:%02X:%02X:%02X:%02X:%02X RSSI:%d %s",
+                            i+1,
+                            devices[i].addr[5], devices[i].addr[4],
+                            devices[i].addr[3], devices[i].addr[2],
+                            devices[i].addr[1], devices[i].addr[0],
+                            devices[i].rssi,
+                            devices[i].has_name ? devices[i].name : "NO_NAME");
+                }
+                ESP_LOGI(TAG, "==================");
+            } else {
+                ESP_LOGI(TAG, "No devices found in this scan");
+            }
+        } else {
+            ESP_LOGE(TAG, "❌ Failed to start BLE scan #%d: %s",
+                    scan_count, esp_err_to_name(ret));
+        }
+
+        ESP_LOGI(TAG, "Waiting 10 seconds before next scan...");
+        vTaskDelay(pdMS_TO_TICKS(10000));
+    }
+}
+
 // System initialization
 static void init_system(void) {
     esp_err_t ret = nvs_flash_init();
@@ -1081,6 +1136,9 @@ static void init_system(void) {
     ESP_LOGI(TAG, "Initializing SWD connection...");
     try_swd_connection();
     
+    // DON'T initialize BLE here - let the delayed task do it
+    ESP_LOGI(TAG, "BLE initialization will start in 10 seconds...");
+
     xTaskCreate(system_health_task, "health", 4096, NULL, 5, NULL);
 }
 
@@ -1094,6 +1152,66 @@ static esp_err_t release_swd_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// Delayed BLE initialization task
+static void delayed_ble_init_task(void *arg) {
+    ESP_LOGI(TAG, "=== Delayed BLE Init Task Started ===");
+    ESP_LOGI(TAG, "Waiting 10 seconds before initializing BLE...");
+
+    // Wait 10 seconds
+    for (int i = 10; i > 0; i--) {
+        ESP_LOGI(TAG, "BLE init countdown: %d seconds...", i);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    ESP_LOGI(TAG, "=== Starting BLE Initialization NOW ===");
+
+    // Debug: Check if BT is compiled in
+    #ifdef CONFIG_BT_ENABLED
+        ESP_LOGI(TAG, "✅ CONFIG_BT_ENABLED is defined");
+    #else
+        ESP_LOGE(TAG, "❌ CONFIG_BT_ENABLED is NOT defined - Bluetooth is disabled!");
+    #endif
+
+    #ifdef CONFIG_BT_NIMBLE_ENABLED
+        ESP_LOGI(TAG, "✅ CONFIG_BT_NIMBLE_ENABLED is defined");
+    #else
+        ESP_LOGE(TAG, "❌ CONFIG_BT_NIMBLE_ENABLED is NOT defined");
+    #endif
+
+    // Initialize BLE proxy
+    ESP_LOGI(TAG, "Calling ble_proxy_init()...");
+    esp_err_t ble_ret = ble_proxy_init();
+    if (ble_ret != ESP_OK) {
+        ESP_LOGE(TAG, "❌ Failed to initialize BLE: %s (0x%x)",
+                esp_err_to_name(ble_ret), ble_ret);
+        // Delete this task and exit
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "✅ BLE initialized successfully");
+
+    // Wait another 2 seconds for BLE to stabilize
+    ESP_LOGI(TAG, "Waiting 2 seconds for BLE to stabilize...");
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    ESP_LOGI(TAG, "Starting BLE scan task...");
+
+    // Now start the scan task
+    BaseType_t task_created = xTaskCreate(ble_scan_task, "ble_scan",
+                                          4096, NULL, 5, NULL);
+    if (task_created == pdPASS) {
+        ESP_LOGI(TAG, "✅ BLE scan task created successfully");
+    } else {
+        ESP_LOGE(TAG, "❌ Failed to create BLE scan task");
+    }
+
+    ESP_LOGI(TAG, "=== Delayed BLE Init Task Complete ===");
+
+    // Delete this task
+    vTaskDelete(NULL);
+}
+
 // Main application entry
 void app_main(void) {
     ESP_LOGI(TAG, "=================================");
@@ -1104,17 +1222,29 @@ void app_main(void) {
     init_system();
     
     ESP_LOGI(TAG, "System initialized successfully");
-    
-    // Print status once
+
+    // Print initial status
     EventBits_t bits = xEventGroupGetBits(system_events);
-    ESP_LOGI(TAG, "Status - SWD:%s WiFi:%s IP:%s", 
+    ESP_LOGI(TAG, "Initial Status - SWD:%s WiFi:%s IP:%s",
             (bits & SWD_CONNECTED_BIT) ? "Connected" : "Disconnected",
             (bits & WIFI_CONNECTED_BIT) ? "Connected" : "Disconnected",
             device_ip);
-    
-    // Main loop - just keep alive, no constant logging
+
+    // Start delayed BLE initialization
+    ESP_LOGI(TAG, "Creating delayed BLE initialization task...");
+    xTaskCreate(delayed_ble_init_task, "ble_init", 8192, NULL, 5, NULL);
+
+    // Main loop
+    int loop_count = 0;
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(30000));  // 30 seconds
-        // Silent unless there's an error
+        loop_count++;
+        ESP_LOGI(TAG, "Main loop alive (iteration %d)", loop_count);
+
+        // Only print BLE status after we expect it to be initialized (after 15 seconds)
+        if (loop_count > 0 || (xTaskGetTickCount() > pdMS_TO_TICKS(15000))) {
+            uint16_t device_count = ble_proxy_get_device_count();
+            ESP_LOGI(TAG, "Current BLE device count: %d", device_count);
+        }
     }
 }
