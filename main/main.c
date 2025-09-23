@@ -26,6 +26,7 @@
 #include "power_mgmt.h"
 #include "flash_safety.h"
 #include "ble_proxy.h"
+#include "web_ble.h"
 
 
 static const char *TAG = "FLASHER";
@@ -193,9 +194,30 @@ static esp_err_t root_handler(httpd_req_t *req) {
     // Part 3: Other tabs
     const char* other_tabs =
         "<div id='bt-proxy' class='tab-pane'>"
-        "<div style='text-align:center;padding:60px 20px;color:#6c757d;'>"
-        "<h2>🔗 Bluetooth Proxy</h2>"
-        "<p>Coming soon...</p>"
+        "<h2>🔗 Bluetooth Device Scanner</h2>"
+        "<div class='info-card'>"
+        "<h3>BLE Scanning Control</h3>"
+        "<div style='margin-bottom:20px;'>"
+        "<button id='startScanBtn' class='btn btn-success' onclick='startBleScan()'>Start Scan</button>"
+        "<button id='stopScanBtn' class='btn btn-danger' onclick='stopBleScan()' disabled>Stop Scan</button>"
+        "<button class='btn' onclick='clearBleDevices()'>Clear List</button>"
+        "</div>"
+        "<div style='margin-bottom:15px;'>"
+        "<label for='scanDuration'>Scan Duration (seconds):</label>"
+        "<input type='number' id='scanDuration' value='10' min='1' max='30' style='margin-left:10px;padding:5px;border:1px solid #ddd;border-radius:4px;width:80px;'/>"
+        "</div>"
+        "<div id='bleStatus' style='margin-bottom:15px;padding:10px;background:#f8f9fa;border-radius:5px;font-weight:bold;'>"
+        "Ready to scan for BLE devices"
+        "</div>"
+        "</div>"
+        "<div class='info-card'>"
+        "<h3>Discovered Devices</h3>"
+        "<div id='deviceCount' style='margin-bottom:15px;font-weight:bold;color:#667eea;'>"
+        "0 devices found"
+        "</div>"
+        "<div id='deviceList' style='max-height:400px;overflow-y:auto;'>"
+        "<div style='text-align:center;color:#6c757d;padding:40px;'>No devices discovered yet</div>"
+        "</div>"
         "</div>"
         "</div>"
 
@@ -272,11 +294,13 @@ static esp_err_t root_handler(httpd_req_t *req) {
 
     httpd_resp_send_chunk(req, other_tabs, strlen(other_tabs));
 
-    // Part 4: Complete JavaScript
-    const char* javascript =
+    // Part 4: JavaScript - Split into chunks to avoid memory issues
+    const char* js_start =
         "</div></div>"
         "<script>"
+        "console.log('=== SCRIPT START ===');"
         "let progressTimer = null;"
+        "console.log('progressTimer declared');"
         ""
         "function openTab(evt, tabName) {"
         "  var i, tabcontent, tabs;"
@@ -295,6 +319,9 @@ static esp_err_t root_handler(httpd_req_t *req) {
         "  } else if (tabName === 'power-control') {"
         "    checkPowerStatus();"
         "    updateBatteryStatus();"
+        "  } else if (tabName === 'bt-proxy') {"
+        "    checkScanStatus();"
+        "    updateBleDevices();"
         "  }"
         "}"
         ""
@@ -637,7 +664,9 @@ static esp_err_t root_handler(httpd_req_t *req) {
         "  xhr.send(file);"
         "}"
         ""
-        "// Initialize on page load"
+        "console.log('=== BEFORE BLE FUNCTIONS ===');"
+        ""
+        "// Initialize page"
         "document.addEventListener('DOMContentLoaded', function() {"
         "  console.log('Page loaded, initializing...');"
         "  refreshStatus();"
@@ -647,10 +676,175 @@ static esp_err_t root_handler(httpd_req_t *req) {
         "  setInterval(checkPowerStatus, 5000);"
         "  setInterval(updateBatteryStatus, 5000);"
         "});"
+        "console.log('=== SCRIPT END ===');"
+        "</script>"
+        ""
+        "<!-- BLE Functions Script -->"
+        "<script>"
+        "console.log('=== BLE SCRIPT START ===');"
+        "let bleDevices = [];"
+        "let bleUpdateTimer = null;"
+        "console.log('BLE variables declared');"
+        ""
+        "function startBleScan() {"
+        "  console.log('startBleScan called');"
+        "  const duration = document.getElementById('scanDuration').value;"
+        "  document.getElementById('startScanBtn').disabled = true;"
+        "  document.getElementById('stopScanBtn').disabled = false;"
+        "  document.getElementById('bleStatus').innerHTML = '<span style=\"color:#007bff;\">Starting scan...</span>';"
+        "  "
+        "  fetch('/ble/scan?duration=' + duration, { method: 'POST' })"
+        "    .then(response => response.json())"
+        "    .then(data => {"
+        "      if (data.success) {"
+        "        document.getElementById('bleStatus').innerHTML = '<span style=\"color:#28a745;\">Scanning for ' + data.duration + ' seconds...</span>';"
+        "        bleUpdateTimer = setInterval(updateBleDevices, 1000);"
+        "        setTimeout(() => {"
+        "          document.getElementById('startScanBtn').disabled = false;"
+        "          document.getElementById('stopScanBtn').disabled = true;"
+        "          if (bleUpdateTimer) {"
+        "            clearInterval(bleUpdateTimer);"
+        "            bleUpdateTimer = null;"
+        "          }"
+        "          checkScanStatus();"
+        "        }, data.duration * 1000 + 1000);"
+        "      } else {"
+        "        document.getElementById('bleStatus').innerHTML = '<span style=\"color:#dc3545;\">Failed to start scan: ' + data.error + '</span>';"
+        "        document.getElementById('startScanBtn').disabled = false;"
+        "        document.getElementById('stopScanBtn').disabled = true;"
+        "      }"
+        "    })"
+        "    .catch(error => {"
+        "      console.error('Error starting scan:', error);"
+        "      document.getElementById('bleStatus').innerHTML = '<span style=\"color:#dc3545;\">Error starting scan</span>';"
+        "      document.getElementById('startScanBtn').disabled = false;"
+        "      document.getElementById('stopScanBtn').disabled = true;"
+        "    });"
+        "}"
+        "console.log('startBleScan function defined');"
+        ""
+        "function stopBleScan() {"
+        "  console.log('stopBleScan called');"
+        "  document.getElementById('stopScanBtn').disabled = true;"
+        "  document.getElementById('bleStatus').innerHTML = '<span style=\"color:#ffc107;\">Stopping scan...</span>';"
+        "  "
+        "  fetch('/ble/stop_scan', { method: 'POST' })"
+        "    .then(response => response.json())"
+        "    .then(data => {"
+        "      if (data.success) {"
+        "        document.getElementById('bleStatus').innerHTML = '<span style=\"color:#6c757d;\">Scan stopped</span>';"
+        "      } else {"
+        "        document.getElementById('bleStatus').innerHTML = '<span style=\"color:#dc3545;\">Failed to stop scan</span>';"
+        "      }"
+        "      document.getElementById('startScanBtn').disabled = false;"
+        "      document.getElementById('stopScanBtn').disabled = true;"
+        "      if (bleUpdateTimer) {"
+        "        clearInterval(bleUpdateTimer);"
+        "        bleUpdateTimer = null;"
+        "      }"
+        "    })"
+        "    .catch(error => {"
+        "      console.error('Error stopping scan:', error);"
+        "      document.getElementById('bleStatus').innerHTML = '<span style=\"color:#dc3545;\">Error stopping scan</span>';"
+        "      document.getElementById('startScanBtn').disabled = false;"
+        "      document.getElementById('stopScanBtn').disabled = true;"
+        "    });"
+        "}"
+        ""
+        "function clearBleDevices() {"
+        "  fetch('/ble/clear', { method: 'POST' })"
+        "    .then(response => response.json())"
+        "    .then(data => {"
+        "      if (data.success) {"
+        "        bleDevices = [];"
+        "        updateDeviceDisplay();"
+        "        document.getElementById('bleStatus').textContent = 'Device list cleared';"
+        "      }"
+        "    })"
+        "    .catch(error => console.error('Error clearing devices:', error));"
+        "}"
+        ""
+        "function updateBleDevices() {"
+        "  fetch('/ble/devices')"
+        "    .then(response => response.json())"
+        "    .then(data => {"
+        "      bleDevices = data.devices || [];"
+        "      updateDeviceDisplay();"
+        "      "
+        "      if (data.scanning) {"
+        "        document.getElementById('bleStatus').innerHTML = '<span style=\"color:#28a745;\">Scanning... (' + data.count + ' devices found)</span>';"
+        "      } else if (data.count > 0) {"
+        "        document.getElementById('bleStatus').innerHTML = '<span style=\"color:#17a2b8;\">Scan complete - ' + data.count + ' devices found</span>';"
+        "      }"
+        "    })"
+        "    .catch(error => console.error('Error fetching devices:', error));"
+        "}"
+        ""
+        "function checkScanStatus() {"
+        "  fetch('/ble/scan_status')"
+        "    .then(response => response.json())"
+        "    .then(data => {"
+        "      if (!data.scanning) {"
+        "        document.getElementById('bleStatus').innerHTML = '<span style=\"color:#6c757d;\">Ready to scan (' + data.device_count + ' devices in memory)</span>';"
+        "      }"
+        "    })"
+        "    .catch(error => console.error('Error checking scan status:', error));"
+        "}"
+        "console.log('checkScanStatus function defined');"
+        ""
+        "function updateDeviceDisplay() {"
+        "  const deviceList = document.getElementById('deviceList');"
+        "  const deviceCount = document.getElementById('deviceCount');"
+        "  "
+        "  deviceCount.textContent = bleDevices.length + ' device' + (bleDevices.length !== 1 ? 's' : '') + ' found';"
+        "  "
+        "  if (bleDevices.length === 0) {"
+        "    deviceList.innerHTML = '<div style=\"text-align:center;color:#6c757d;padding:40px;\">No devices discovered yet</div>';"
+        "    return;"
+        "  }"
+        "  "
+        "  let html = '';"
+        "  bleDevices.forEach(device => {"
+        "    const isMeshtastic = device.is_meshtastic || false;"
+        "    const isMeshcore = device.name && device.name.toLowerCase().includes('meshcore-');"
+        "    const deviceClass = isMeshtastic ? 'style=\"background:#e8f5e8;border-left:4px solid #28a745;\"' : "
+        "                       isMeshcore ? 'style=\"background:#e8f0ff;border-left:4px solid #007bff;\"' : '';"
+        "    const nameIcon = isMeshtastic ? '[MESH] ' : isMeshcore ? '[CORE] ' : '[BLE] ';"
+        "    "
+        "    html += '<div ' + deviceClass + ' style=\"margin:10px 0;padding:15px;border:1px solid #dee2e6;border-radius:8px;\">';"
+        "    html += '<div style=\"display:flex;justify-content:space-between;align-items:center;\">';"
+        "    html += '<div><strong>' + nameIcon + device.name + '</strong></div>';"
+        "    html += '<div style=\"font-size:0.9em;color:#6c757d;\">' + device.signal + '</div>';"
+        "    html += '</div>';"
+        "    html += '<div style=\"font-family:monospace;font-size:0.85em;color:#6c757d;margin-top:5px;\">';"
+        "    html += 'MAC: ' + device.mac + ' | RSSI: ' + device.rssi + ' dBm';"
+        "    html += '</div>';"
+        "    if (isMeshtastic) {"
+        "      html += '<div style=\"color:#28a745;font-size:0.85em;margin-top:5px;\">Meshtastic Device</div>';"
+        "    } else if (isMeshcore) {"
+        "      html += '<div style=\"color:#007bff;font-size:0.85em;margin-top:5px;\">Meshcore Device</div>';"
+        "    }"
+        "    html += '</div>';"
+        "  });"
+        "  "
+        "  deviceList.innerHTML = html;"
+        "}"
+        ""
+        "console.log('BLE JavaScript functions loaded:', {"
+        "  startBleScan: typeof startBleScan,"
+        "  stopBleScan: typeof stopBleScan,"
+        "  clearBleDevices: typeof clearBleDevices,"
+        "  updateBleDevices: typeof updateBleDevices,"
+        "  checkScanStatus: typeof checkScanStatus"
+        "});"
+        ""
+        "// Initialize on page load"
+        "console.log('=== BLE SCRIPT END ===');"
         "</script>"
         "</body></html>";
 
-    httpd_resp_send_chunk(req, javascript, strlen(javascript));
+    // Send the complete HTML page as a single chunk
+    httpd_resp_send_chunk(req, js_start, strlen(js_start));
     httpd_resp_send_chunk(req, NULL, 0);
 
     return ESP_OK;
@@ -660,7 +854,7 @@ static esp_err_t root_handler(httpd_req_t *req) {
 static esp_err_t start_webserver(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 12;
+    config.max_uri_handlers = 20;
     config.recv_wait_timeout = 10;
     config.stack_size = 8192;
     
@@ -687,6 +881,9 @@ static esp_err_t start_webserver(void) {
 
         // Register power control handlers
         register_power_handlers(web_server);
+
+        // Register BLE handlers
+        register_ble_handlers(web_server);
 
         ESP_LOGI(TAG, "Web server started successfully");
         return ESP_OK;
@@ -1047,59 +1244,6 @@ static void handle_critical_error(const char *context, esp_err_t error) {
     }
 }
 
-// BLE scan task - runs periodic scans
-static void ble_scan_task(void *arg) {
-    ESP_LOGI(TAG, "=== BLE scan task started ===");
-
-    // Wait a bit for system to stabilize
-    ESP_LOGI(TAG, "BLE task waiting 5 seconds for system to stabilize...");
-    vTaskDelay(pdMS_TO_TICKS(5000));
-
-    int scan_count = 0;
-
-    while (1) {
-        scan_count++;
-        ESP_LOGI(TAG, "=== BLE Scan #%d starting ===", scan_count);
-
-        // Start a 5-second scan
-        esp_err_t ret = ble_proxy_start_scan(5);
-        if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "✅ BLE scan #%d started successfully", scan_count);
-
-            // Wait for scan to complete
-            vTaskDelay(pdMS_TO_TICKS(6000));
-
-            // Report results
-            uint16_t count = ble_proxy_get_device_count();
-            ESP_LOGI(TAG, "📱 BLE scan #%d found %d devices", scan_count, count);
-
-            if (count > 0) {
-                ble_device_info_t devices[10];
-                uint16_t retrieved = ble_proxy_get_devices(devices, 10);
-
-                ESP_LOGI(TAG, "=== Device List ===");
-                for (int i = 0; i < retrieved; i++) {
-                    ESP_LOGI(TAG, "  Device %d: %02X:%02X:%02X:%02X:%02X:%02X RSSI:%d %s",
-                            i+1,
-                            devices[i].addr[5], devices[i].addr[4],
-                            devices[i].addr[3], devices[i].addr[2],
-                            devices[i].addr[1], devices[i].addr[0],
-                            devices[i].rssi,
-                            devices[i].has_name ? devices[i].name : "NO_NAME");
-                }
-                ESP_LOGI(TAG, "==================");
-            } else {
-                ESP_LOGI(TAG, "No devices found in this scan");
-            }
-        } else {
-            ESP_LOGE(TAG, "❌ Failed to start BLE scan #%d: %s",
-                    scan_count, esp_err_to_name(ret));
-        }
-
-        ESP_LOGI(TAG, "Waiting 10 seconds before next scan...");
-        vTaskDelay(pdMS_TO_TICKS(10000));
-    }
-}
 
 // System initialization
 static void init_system(void) {
@@ -1152,64 +1296,18 @@ static esp_err_t release_swd_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// Delayed BLE initialization task
-static void delayed_ble_init_task(void *arg) {
-    ESP_LOGI(TAG, "=== Delayed BLE Init Task Started ===");
-    ESP_LOGI(TAG, "Waiting 10 seconds before initializing BLE...");
+// Simple BLE initialization function
+static esp_err_t init_ble_system(void) {
+    ESP_LOGI(TAG, "Initializing BLE system...");
 
-    // Wait 10 seconds
-    for (int i = 10; i > 0; i--) {
-        ESP_LOGI(TAG, "BLE init countdown: %d seconds...", i);
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_err_t ret = ble_proxy_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize BLE: %s", esp_err_to_name(ret));
+        return ret;
     }
 
-    ESP_LOGI(TAG, "=== Starting BLE Initialization NOW ===");
-
-    // Debug: Check if BT is compiled in
-    #ifdef CONFIG_BT_ENABLED
-        ESP_LOGI(TAG, "✅ CONFIG_BT_ENABLED is defined");
-    #else
-        ESP_LOGE(TAG, "❌ CONFIG_BT_ENABLED is NOT defined - Bluetooth is disabled!");
-    #endif
-
-    #ifdef CONFIG_BT_NIMBLE_ENABLED
-        ESP_LOGI(TAG, "✅ CONFIG_BT_NIMBLE_ENABLED is defined");
-    #else
-        ESP_LOGE(TAG, "❌ CONFIG_BT_NIMBLE_ENABLED is NOT defined");
-    #endif
-
-    // Initialize BLE proxy
-    ESP_LOGI(TAG, "Calling ble_proxy_init()...");
-    esp_err_t ble_ret = ble_proxy_init();
-    if (ble_ret != ESP_OK) {
-        ESP_LOGE(TAG, "❌ Failed to initialize BLE: %s (0x%x)",
-                esp_err_to_name(ble_ret), ble_ret);
-        // Delete this task and exit
-        vTaskDelete(NULL);
-        return;
-    }
-
-    ESP_LOGI(TAG, "✅ BLE initialized successfully");
-
-    // Wait another 2 seconds for BLE to stabilize
-    ESP_LOGI(TAG, "Waiting 2 seconds for BLE to stabilize...");
-    vTaskDelay(pdMS_TO_TICKS(2000));
-
-    ESP_LOGI(TAG, "Starting BLE scan task...");
-
-    // Now start the scan task
-    BaseType_t task_created = xTaskCreate(ble_scan_task, "ble_scan",
-                                          4096, NULL, 5, NULL);
-    if (task_created == pdPASS) {
-        ESP_LOGI(TAG, "✅ BLE scan task created successfully");
-    } else {
-        ESP_LOGE(TAG, "❌ Failed to create BLE scan task");
-    }
-
-    ESP_LOGI(TAG, "=== Delayed BLE Init Task Complete ===");
-
-    // Delete this task
-    vTaskDelete(NULL);
+    ESP_LOGI(TAG, "BLE system initialized successfully");
+    return ESP_OK;
 }
 
 // Main application entry
@@ -1230,21 +1328,20 @@ void app_main(void) {
             (bits & WIFI_CONNECTED_BIT) ? "Connected" : "Disconnected",
             device_ip);
 
-    // Start delayed BLE initialization
-    ESP_LOGI(TAG, "Creating delayed BLE initialization task...");
-    xTaskCreate(delayed_ble_init_task, "ble_init", 8192, NULL, 5, NULL);
+    // Initialize BLE system
+    ESP_LOGI(TAG, "Starting BLE initialization...");
+    esp_err_t ble_ret = init_ble_system();
+    if (ble_ret != ESP_OK) {
+        ESP_LOGE(TAG, "BLE initialization failed, continuing without BLE");
+    }
 
-    // Main loop
-    int loop_count = 0;
+    ESP_LOGI(TAG, "=== System Ready ===");
+    ESP_LOGI(TAG, "Web interface available at: http://%s", device_ip);
+    ESP_LOGI(TAG, "BLE scanning available via web interface");
+
+    // Simple main loop - system is now controlled via web interface
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(30000));  // 30 seconds
-        loop_count++;
-        ESP_LOGI(TAG, "Main loop alive (iteration %d)", loop_count);
-
-        // Only print BLE status after we expect it to be initialized (after 15 seconds)
-        if (loop_count > 0 || (xTaskGetTickCount() > pdMS_TO_TICKS(15000))) {
-            uint16_t device_count = ble_proxy_get_device_count();
-            ESP_LOGI(TAG, "Current BLE device count: %d", device_count);
-        }
+        vTaskDelay(pdMS_TO_TICKS(60000));  // 60 seconds
+        ESP_LOGI(TAG, "System alive - Web: http://%s", device_ip);
     }
 }
