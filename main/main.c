@@ -196,6 +196,28 @@ static esp_err_t root_handler(httpd_req_t *req) {
         "<div id='bt-proxy' class='tab-pane'>"
         "<h2>🔗 Bluetooth Device Scanner</h2>"
         "<div class='info-card'>"
+        "<h3>Connection Status</h3>"
+        "<div id='connStatus' style='margin-bottom:15px;padding:10px;background:#f8f9fa;border-radius:5px;'>"
+        "<span id='connIndicator' class='status-indicator status-offline'></span>"
+        "<span id='connText'>Not connected</span>"
+        "</div>"
+        "<button class='btn' onclick='showPINModal()'>Enter PIN Manually</button>"
+        "<div id='connectedDevice' style='display:none;margin:10px 0;'>"
+        "<div style='margin:5px 0;'>Connected to: <strong id='connDeviceAddr'></strong></div>"
+        "<button class='btn btn-danger' onclick='disconnectBLE()'>Disconnect</button>"
+        "</div>"
+        "</div>"
+        "<div class='info-card'>"
+        "<h3>📱 Meshtastic Connection Instructions</h3>"
+        "<ol style='margin:10px 0;padding-left:20px;'>"
+        "<li>On your Meshtastic device, go to Settings → Bluetooth</li>"
+        "<li>Enable 'Bluetooth Enabled' and 'Serial Output Enabled'</li>"
+        "<li>Set 'Pairing Mode' to 'Fixed PIN' or 'No PIN'</li>"
+        "<li>If using Fixed PIN, default is usually 123456</li>"
+        "<li>The device must be actively advertising (screen on)</li>"
+        "</ol>"
+        "</div>"
+        "<div class='info-card'>"
         "<h3>BLE Scanning Control</h3>"
         "<div style='margin-bottom:20px;'>"
         "<button id='startScanBtn' class='btn btn-success' onclick='startBleScan()'>Start Scan</button>"
@@ -219,6 +241,16 @@ static esp_err_t root_handler(httpd_req_t *req) {
         "<div style='text-align:center;color:#6c757d;padding:40px;'>No devices discovered yet</div>"
         "</div>"
         "</div>"
+        "<div id='pinModal' style='display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:white;padding:20px;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,0.3);z-index:1000;'>"
+        "<h3>Enter PIN</h3>"
+        "<p>Enter the PIN displayed on the device:</p>"
+        "<input type='number' id='pinInput' maxlength='6' style='padding:10px;font-size:20px;width:150px;text-align:center;'/>"
+        "<div style='margin-top:15px;'>"
+        "<button class='btn' onclick='submitPIN()'>Submit</button>"
+        "<button class='btn' onclick='closePINModal()'>Cancel</button>"
+        "</div>"
+        "</div>"
+        "<div id='modalOverlay' style='display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:999;'></div>"
         "</div>"
 
         "<div id='power-control' class='tab-pane'>"
@@ -824,10 +856,96 @@ static esp_err_t root_handler(httpd_req_t *req) {
         "    } else if (isMeshcore) {"
         "      html += '<div style=\"color:#007bff;font-size:0.85em;margin-top:5px;\">Meshcore Device</div>';"
         "    }"
+        "    html += '<div style=\"margin-top:10px;text-align:right;\">';"
+        "    html += '<button style=\"background:#28a745;color:white;border:none;padding:6px 12px;border-radius:4px;font-size:0.85em;cursor:pointer;\" onclick=\"console.log(\\'Connect to:\\', \\'' + device.mac + '\\'); connectToDevice(\\'' + device.mac + '\\')\">Connect</button>';"
+        "    html += '</div>';"
         "    html += '</div>';"
         "  });"
         "  "
         "  deviceList.innerHTML = html;"
+        "}"
+        ""
+        "function connectToDevice(addr) {"
+        "  console.log('Connecting to device:', addr);"
+        "  if (!addr || addr.length !== 17) {"
+        "    alert('Invalid device address');"
+        "    return;"
+        "  }"
+        "  document.getElementById('bleStatus').innerHTML = '<span style=\"color:#007bff;\">Connecting to ' + addr + '...</span>';"
+        "  fetch('/ble/connect', {"
+        "    method: 'POST',"
+        "    headers: {'Content-Type': 'application/x-www-form-urlencoded'},"
+        "    body: 'addr=' + encodeURIComponent(addr)"
+        "  }).then(r => r.json()).then(d => {"
+        "    if (d.success) {"
+        "      console.log('Connection initiated');"
+        "      document.getElementById('bleStatus').innerHTML = '<span style=\"color:#17a2b8;\">Connection attempt started...</span>';"
+        "      setTimeout(function() { checkConnectionStatus(); }, 2000);"
+        "    } else {"
+        "      console.log('Connection failed:', d.error);"
+        "      document.getElementById('bleStatus').innerHTML = '<span style=\"color:#dc3545;\">Failed: ' + (d.error || 'Unknown') + '</span>';"
+        "    }"
+        "  }).catch(e => {"
+        "    console.error('Connection error:', e);"
+        "    document.getElementById('bleStatus').innerHTML = '<span style=\"color:#dc3545;\">Connection error</span>';"
+        "  });"
+        "}"
+        ""
+        "function checkConnectionStatus() {"
+        "  fetch('/ble/conn_status').then(r => r.json()).then(d => {"
+        "    if (d.connected) {"
+        "      console.log('Device connected!');"
+        "      document.getElementById('bleStatus').innerHTML = '<span style=\"color:#28a745;\">Connected successfully!</span>';"
+        "      var indicator = document.getElementById('connIndicator');"
+        "      if (indicator) indicator.className = 'status-indicator status-online';"
+        "      var text = document.getElementById('connText');"
+        "      if (text) text.textContent = 'Connected';"
+        "      var connDiv = document.getElementById('connectedDevice');"
+        "      if (connDiv) {"
+        "        connDiv.style.display = 'block';"
+        "        var addrEl = document.getElementById('connDeviceAddr');"
+        "        if (addrEl && d.peer_addr) addrEl.textContent = d.peer_addr;"
+        "      }"
+        "    } else {"
+        "      console.log('Not connected, state:', d.state);"
+        "      if (d.state == 0) {"
+        "        document.getElementById('bleStatus').innerHTML = '<span style=\"color:#dc3545;\">Connection failed - Make sure device is in pairing mode</span>';"
+        "      }"
+        "    }"
+        "  }).catch(e => {"
+        "    console.error('Status check error:', e);"
+        "  });"
+        "}"
+        ""
+        "function showPINModal() {"
+        "  document.getElementById('pinModal').style.display = 'block';"
+        "  document.getElementById('modalOverlay').style.display = 'block';"
+        "  document.getElementById('pinInput').value = '';"
+        "  document.getElementById('pinInput').focus();"
+        "}"
+        ""
+        "function closePINModal() {"
+        "  document.getElementById('pinModal').style.display = 'none';"
+        "  document.getElementById('modalOverlay').style.display = 'none';"
+        "}"
+        ""
+        "function submitPIN() {"
+        "  const pin = document.getElementById('pinInput').value;"
+        "  if (pin.length < 1) {"
+        "    alert('Please enter a PIN');"
+        "    return;"
+        "  }"
+        "  "
+        "  fetch('/ble/passkey?pin=' + pin, { method: 'POST' })"
+        "    .then(response => response.json())"
+        "    .then(data => {"
+        "      if (data.success) {"
+        "        closePINModal();"
+        "        document.getElementById('bleStatus').innerHTML = '<span style=\"color:#17a2b8;\">PIN submitted</span>';"
+        "      } else {"
+        "        alert('Failed to submit PIN');"
+        "      }"
+        "    });"
         "}"
         ""
         "console.log('BLE JavaScript functions loaded:', {"
@@ -835,7 +953,12 @@ static esp_err_t root_handler(httpd_req_t *req) {
         "  stopBleScan: typeof stopBleScan,"
         "  clearBleDevices: typeof clearBleDevices,"
         "  updateBleDevices: typeof updateBleDevices,"
-        "  checkScanStatus: typeof checkScanStatus"
+        "  checkScanStatus: typeof checkScanStatus,"
+        "  connectToDevice: typeof connectToDevice,"
+        "  checkConnectionStatus: typeof checkConnectionStatus,"
+        "  showPINModal: typeof showPINModal,"
+        "  closePINModal: typeof closePINModal,"
+        "  submitPIN: typeof submitPIN"
         "});"
         ""
         "// Initialize on page load"
@@ -843,8 +966,10 @@ static esp_err_t root_handler(httpd_req_t *req) {
         "</script>"
         "</body></html>";
 
-    // Send the complete HTML page as a single chunk
+    // Send the main HTML page
     httpd_resp_send_chunk(req, js_start, strlen(js_start));
+
+    // The connection functionality has been moved to the main BLE script above
     httpd_resp_send_chunk(req, NULL, 0);
 
     return ESP_OK;
@@ -854,7 +979,7 @@ static esp_err_t root_handler(httpd_req_t *req) {
 static esp_err_t start_webserver(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 20;
+    config.max_uri_handlers = 30;
     config.recv_wait_timeout = 10;
     config.stack_size = 8192;
     
@@ -1296,6 +1421,16 @@ static esp_err_t release_swd_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// BLE passkey callback function
+static void ble_passkey_callback(uint16_t conn_handle, uint32_t passkey) {
+    ESP_LOGI(TAG, "Passkey event: handle=%d, passkey=%lu", conn_handle, passkey);
+    if (passkey == 0) {
+        ESP_LOGI(TAG, "Device requires passkey input - use web interface");
+    } else {
+        ESP_LOGI(TAG, "Display passkey: %06lu", passkey);
+    }
+}
+
 // Simple BLE initialization function
 static esp_err_t init_ble_system(void) {
     ESP_LOGI(TAG, "Initializing BLE system...");
@@ -1305,6 +1440,9 @@ static esp_err_t init_ble_system(void) {
         ESP_LOGE(TAG, "Failed to initialize BLE: %s", esp_err_to_name(ret));
         return ret;
     }
+
+    // Register passkey callback
+    ble_proxy_register_passkey_cb(ble_passkey_callback);
 
     ESP_LOGI(TAG, "BLE system initialized successfully");
     return ESP_OK;

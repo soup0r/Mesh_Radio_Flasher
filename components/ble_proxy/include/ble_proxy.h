@@ -78,4 +78,8 @@ void ble_proxy_register_disconnect_cb(ble_disconnect_cb_t cb);
 void ble_proxy_register_passkey_cb(ble_passkey_cb_t cb);
 void ble_proxy_register_data_cb(ble_data_received_cb_t cb);
 
+// Data communication
+esp_err_t ble_proxy_send_data(const uint8_t *data, uint16_t len);
+void test_meshtastic_communication(void);
+
 #endif // BLE_PROXY_H

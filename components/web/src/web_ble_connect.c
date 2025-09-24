@@ -5,41 +5,97 @@
 #include <string.h>
 #include <stdlib.h>
 
+#ifndef MIN
+#define MIN(a,b) ((a) < (b) ? (a) : (b))
+#endif
+
 static const char *TAG = "WEB_BLE_CONN";
 
 // Connect to device handler
 static esp_err_t ble_connect_handler(httpd_req_t *req) {
-    char query[128] = {0};
+    char content[128];
     char addr_str[18] = {0};
 
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-        httpd_query_key_value(query, "addr", addr_str, sizeof(addr_str));
+    // Read POST data
+    int ret = httpd_req_recv(req, content, MIN(req->content_len, sizeof(content) - 1));
+    if (ret <= 0) {
+        ESP_LOGE(TAG, "Failed to receive POST data");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to receive data");
+        return ESP_FAIL;
+    }
+    content[ret] = '\0';
+
+    ESP_LOGI(TAG, "Received POST data: %s", content);
+
+    // Parse the address manually from "addr=XX:XX:XX:XX:XX:XX" format
+    char *addr_start = strstr(content, "addr=");
+    if (!addr_start) {
+        ESP_LOGE(TAG, "No addr parameter found");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing address parameter");
+        return ESP_FAIL;
     }
 
+    addr_start += 5; // Skip "addr="
+
+    // URL decode the address
+    char *src = addr_start;
+    char *dst = addr_str;
+    int dst_idx = 0;
+
+    while (*src && dst_idx < 17) {
+        if (*src == '%' && src[1] && src[2]) {
+            // URL-encoded character
+            char hex[3] = {src[1], src[2], '\0'};
+            *dst++ = (char)strtol(hex, NULL, 16);
+            src += 3;
+            dst_idx++;
+        } else if (*src == '&' || *src == ' ') {
+            // End of parameter
+            break;
+        } else {
+            // Regular character
+            *dst++ = *src++;
+            dst_idx++;
+        }
+    }
+    *dst = '\0';
+
+    ESP_LOGI(TAG, "Decoded address: %s (length: %d)", addr_str, strlen(addr_str));
+
     if (strlen(addr_str) != 17) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid address");
+        ESP_LOGE(TAG, "Invalid address length: %d", strlen(addr_str));
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid address format");
         return ESP_FAIL;
     }
 
     // Parse MAC address
     uint8_t addr[6];
-    if (sscanf(addr_str, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
-               &addr[5], &addr[4], &addr[3], &addr[2], &addr[1], &addr[0]) != 6) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid address format");
+    int scan_res = sscanf(addr_str, "%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx",
+                         &addr[5], &addr[4], &addr[3], &addr[2], &addr[1], &addr[0]);
+
+    if (scan_res != 6) {
+        ESP_LOGE(TAG, "Failed to parse MAC address, sscanf returned: %d", scan_res);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid MAC address");
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Connect request for %s", addr_str);
+    ESP_LOGI(TAG, "Connecting to: %02X:%02X:%02X:%02X:%02X:%02X",
+             addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
 
-    esp_err_t ret = ble_proxy_connect(addr);
+    // IMPORTANT: Stop scan before connecting
+    extern esp_err_t ble_proxy_stop_scan(void);
+    ble_proxy_stop_scan();
+    vTaskDelay(pdMS_TO_TICKS(200));  // Give it time to stop
+
+    esp_err_t conn_ret = ble_proxy_connect(addr);
 
     cJSON *json = cJSON_CreateObject();
-    if (ret == ESP_OK) {
+    if (conn_ret == ESP_OK) {
         cJSON_AddBoolToObject(json, "success", true);
         cJSON_AddStringToObject(json, "message", "Connecting...");
     } else {
         cJSON_AddBoolToObject(json, "success", false);
-        cJSON_AddStringToObject(json, "error", esp_err_to_name(ret));
+        cJSON_AddStringToObject(json, "error", esp_err_to_name(conn_ret));
     }
 
     char *json_str = cJSON_Print(json);

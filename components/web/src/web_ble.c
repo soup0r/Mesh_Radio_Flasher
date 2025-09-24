@@ -6,6 +6,9 @@
 
 static const char *TAG = "WEB_BLE";
 
+// External declaration for connection handlers
+extern esp_err_t register_ble_connect_handlers(httpd_handle_t server);
+
 // Start BLE scan handler
 static esp_err_t ble_scan_handler(httpd_req_t *req) {
     ESP_LOGI(TAG, "BLE scan requested from web interface");
@@ -205,6 +208,9 @@ esp_err_t register_ble_handlers(httpd_handle_t server) {
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &ble_scan_status_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &ble_devices_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &ble_clear_uri));
+
+    // Register connection handlers
+    register_ble_connect_handlers(server);
 
     ESP_LOGI(TAG, "BLE web handlers registered");
     return ESP_OK;
