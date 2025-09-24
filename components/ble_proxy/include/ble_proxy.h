@@ -45,6 +45,14 @@ typedef enum {
     BLE_STATE_DISCONNECTING
 } ble_state_t;
 
+// Proxy states
+typedef enum {
+    PROXY_IDLE = 0,
+    PROXY_CONNECTING,
+    PROXY_GATT_READY,     // Service + chrs + CCCD enabled + MTU exchanged
+    PROXY_RUNNING         // TCP proxy is running
+} proxy_state_t;
+
 // Connection info
 typedef struct {
     uint16_t conn_handle;
@@ -78,8 +86,23 @@ void ble_proxy_register_disconnect_cb(ble_disconnect_cb_t cb);
 void ble_proxy_register_passkey_cb(ble_passkey_cb_t cb);
 void ble_proxy_register_data_cb(ble_data_received_cb_t cb);
 
-// Data communication
+// Proxy state functions
+proxy_state_t ble_proxy_get_state(void);
+bool ble_proxy_gatt_ready(void);
+
+// Handle accessor functions (read-only accessors for tcp_proxy.c)
+uint16_t ble_proxy_get_rx_handle(void);
+uint16_t ble_proxy_get_tx_handle(void);
+
+// Safe send (chunks to MTU-3, returns ESP_OK/ESP_FAIL)
 esp_err_t ble_proxy_send_data(const uint8_t *data, uint16_t len);
+
+// Test function
 void test_meshtastic_communication(void);
+
+// TCP proxy functions (safe to call multiple times)
+void start_tcp_proxy(void);
+void stop_tcp_proxy(void);
+void tcp_forward_ble_data(uint8_t *data, uint16_t len);
 
 #endif // BLE_PROXY_H
