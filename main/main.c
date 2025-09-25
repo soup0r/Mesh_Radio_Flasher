@@ -1371,13 +1371,16 @@ static void handle_critical_error(const char *context, esp_err_t error) {
 
 
 // System initialization
+// System initialization
 static void init_system(void) {
+    // CRITICAL: NVS must be initialized before BLE
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+    ESP_LOGI(TAG, "NVS Flash initialized");
     
     init_config();
     system_events = xEventGroupCreate();

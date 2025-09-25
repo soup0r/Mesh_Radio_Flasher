@@ -8,10 +8,53 @@
 #include "host/ble_hs.h"
 #include "host/ble_gap.h"
 #include "host/util/util.h"
-#include "services/gap/ble_svc_gap.h"
+// Removed: #include "services/gap/ble_svc_gap.h" - Not needed for central role
 #include "host/ble_store.h"
 #include "store/config/ble_store_config.h"
 #include <string.h>
+
+// Forward declaration - function exists but not declared in header
+void ble_store_config_init(void);
+
+// Helper macro for stringification
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
+
+// SYSTEMATIC DEBUGGING: Check what's actually being compiled
+#pragma message "=== SECURITY MANAGER COMPILATION CHECK ==="
+
+#ifdef MYNEWT_VAL_BLE_SM
+#pragma message "✅ MYNEWT_VAL_BLE_SM is defined as: " TOSTRING(MYNEWT_VAL_BLE_SM)
+#else
+#pragma message "❌ MYNEWT_VAL_BLE_SM is NOT DEFINED"
+#endif
+
+#ifdef MYNEWT_VAL_BLE_SM_LEGACY
+#pragma message "✅ MYNEWT_VAL_BLE_SM_LEGACY is defined as: " TOSTRING(MYNEWT_VAL_BLE_SM_LEGACY)
+#else
+#pragma message "❌ MYNEWT_VAL_BLE_SM_LEGACY is NOT DEFINED"
+#endif
+
+#ifdef MYNEWT_VAL_BLE_SM_SC
+#pragma message "✅ MYNEWT_VAL_BLE_SM_SC is defined as: " TOSTRING(MYNEWT_VAL_BLE_SM_SC)
+#else
+#pragma message "❌ MYNEWT_VAL_BLE_SM_SC is NOT DEFINED"
+#endif
+
+#ifdef MYNEWT_VAL_BLE_STORE_CONFIG
+#pragma message "✅ MYNEWT_VAL_BLE_STORE_CONFIG is defined as: " TOSTRING(MYNEWT_VAL_BLE_STORE_CONFIG)
+#else
+#pragma message "❌ MYNEWT_VAL_BLE_STORE_CONFIG is NOT DEFINED"
+#endif
+
+// Check if Security Manager functions are available at compile time
+#ifdef BLE_SM_IOACT_INPUT
+#pragma message "✅ BLE_SM_IOACT_INPUT is available"
+#else
+#pragma message "❌ BLE_SM_IOACT_INPUT is NOT available"
+#endif
+
+#pragma message "=== END SECURITY MANAGER COMPILATION CHECK ==="
 
 static const char *TAG = "BLE_PROXY";
 
@@ -203,6 +246,81 @@ esp_err_t ble_proxy_init(void) {
     ESP_LOGI(TAG, "Initializing BLE proxy...");
     esp_err_t ret;
 
+    // RUNTIME DEBUGGING: Check actual MYNEWT_VAL values
+    ESP_LOGI(TAG, "=== RUNTIME SECURITY MANAGER CHECK ===");
+
+    #ifdef MYNEWT_VAL_BLE_SM
+        ESP_LOGI(TAG, "✅ MYNEWT_VAL_BLE_SM runtime value: %d", MYNEWT_VAL_BLE_SM);
+    #else
+        ESP_LOGE(TAG, "❌ MYNEWT_VAL_BLE_SM not defined at runtime");
+    #endif
+
+    #ifdef MYNEWT_VAL_BLE_SM_LEGACY
+        ESP_LOGI(TAG, "✅ MYNEWT_VAL_BLE_SM_LEGACY runtime value: %d", MYNEWT_VAL_BLE_SM_LEGACY);
+    #else
+        ESP_LOGE(TAG, "❌ MYNEWT_VAL_BLE_SM_LEGACY not defined at runtime");
+    #endif
+
+    #ifdef MYNEWT_VAL_BLE_SM_SC
+        ESP_LOGI(TAG, "✅ MYNEWT_VAL_BLE_SM_SC runtime value: %d", MYNEWT_VAL_BLE_SM_SC);
+    #else
+        ESP_LOGE(TAG, "❌ MYNEWT_VAL_BLE_SM_SC not defined at runtime");
+    #endif
+
+    #ifdef MYNEWT_VAL_BLE_STORE_CONFIG
+        ESP_LOGI(TAG, "✅ MYNEWT_VAL_BLE_STORE_CONFIG runtime value: %d", MYNEWT_VAL_BLE_STORE_CONFIG);
+    #else
+        ESP_LOGE(TAG, "❌ MYNEWT_VAL_BLE_STORE_CONFIG not defined at runtime");
+    #endif
+
+    // Check if Security Manager functions are available
+    ESP_LOGI(TAG, "=== SECURITY MANAGER FUNCTION CHECK ===");
+    #ifdef BLE_SM_IOACT_INPUT
+        ESP_LOGI(TAG, "✅ BLE_SM_IOACT_INPUT available: %d", BLE_SM_IOACT_INPUT);
+    #else
+        ESP_LOGE(TAG, "❌ BLE_SM_IOACT_INPUT not available");
+    #endif
+
+    #ifdef BLE_SM_IOACT_OOB
+        ESP_LOGI(TAG, "✅ BLE_SM_IOACT_OOB available: %d", BLE_SM_IOACT_OOB);
+    #else
+        ESP_LOGE(TAG, "❌ BLE_SM_IOACT_OOB not available");
+    #endif
+
+    ESP_LOGI(TAG, "=== END RUNTIME SM CHECK ===");
+
+    // CONFIGURATION VERIFICATION: Check ESP-IDF config matches sdkconfig.defaults
+    ESP_LOGI(TAG, "=== NIMBLE CONFIGURATION VERIFICATION ===");
+
+    #ifdef CONFIG_BT_NIMBLE_SECURITY_ENABLE
+        ESP_LOGI(TAG, "✅ CONFIG_BT_NIMBLE_SECURITY_ENABLE: enabled");
+    #else
+        ESP_LOGE(TAG, "❌ CONFIG_BT_NIMBLE_SECURITY_ENABLE: not enabled");
+    #endif
+
+    #ifdef CONFIG_BT_NIMBLE_SM_LEGACY
+        ESP_LOGI(TAG, "✅ CONFIG_BT_NIMBLE_SM_LEGACY: enabled");
+    #else
+        ESP_LOGE(TAG, "❌ CONFIG_BT_NIMBLE_SM_LEGACY: not enabled");
+    #endif
+
+    #ifdef CONFIG_BT_NIMBLE_SM_SC
+        ESP_LOGI(TAG, "✅ CONFIG_BT_NIMBLE_SM_SC: enabled");
+    #else
+        ESP_LOGE(TAG, "❌ CONFIG_BT_NIMBLE_SM_SC: not enabled");
+    #endif
+
+    ESP_LOGI(TAG, "CONFIG_BT_NIMBLE_MAX_BONDS: %d", CONFIG_BT_NIMBLE_MAX_BONDS);
+    ESP_LOGI(TAG, "CONFIG_BT_NIMBLE_MAX_CONNECTIONS: %d", CONFIG_BT_NIMBLE_MAX_CONNECTIONS);
+
+    #ifdef CONFIG_BT_NIMBLE_NVS_PERSIST
+        ESP_LOGI(TAG, "✅ CONFIG_BT_NIMBLE_NVS_PERSIST: enabled");
+    #else
+        ESP_LOGE(TAG, "❌ CONFIG_BT_NIMBLE_NVS_PERSIST: not enabled");
+    #endif
+
+    ESP_LOGI(TAG, "=== END NIMBLE CONFIG VERIFICATION ===");
+
     // Check if BLE is enabled in menuconfig
     #ifndef CONFIG_BT_ENABLED
         ESP_LOGE(TAG, "CONFIG_BT_ENABLED is not set!");
@@ -236,24 +354,35 @@ esp_err_t ble_proxy_init(void) {
     ble_hs_cfg.sync_cb = ble_app_on_sync;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;  // Add this
 
-    // Fixed security for Meshtastic
-    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_KEYBOARD_ONLY;  // We input the PIN
-    ble_hs_cfg.sm_bonding = 1;                           // Enable bonding
-    ble_hs_cfg.sm_mitm = 1;                             // MITM required
-    ble_hs_cfg.sm_sc = 1;                               // Support LESC
-    ble_hs_cfg.sm_sc_only = 0;                          // IMPORTANT: Allow legacy fallback!
+    // CRITICAL: For Meshtastic compatibility based on NimBLE docs
+    // Meshtastic expects KEYBOARD_ONLY or DISP_YES_NO for fixed PIN
+    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_KEYBOARD_ONLY;  // We input PIN
+    ble_hs_cfg.sm_bonding = 1;                            // Enable bonding
+    ble_hs_cfg.sm_mitm = 1;                              // MITM required for passkey
+    ble_hs_cfg.sm_sc = 1;                                // Secure connections
+    ble_hs_cfg.sm_sc_only = 0;                           // Allow legacy pairing
+
+    // Key distribution as per NimBLE docs
     ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
 
-    ESP_LOGI(TAG, "NimBLE configured for simplified pairing");
+    ESP_LOGI(TAG, "Security: IO_CAP=KEYBOARD_ONLY, MITM=1, SC=1, Bonding=1");
 
-    // Initialize GAP service
-    ESP_LOGI(TAG, "Initializing GAP service...");
-    ble_svc_gap_init();
-    ESP_LOGI(TAG, "GAP service initialized");
+    // REMOVED GAP service initialization - NOT NEEDED FOR CENTRAL ROLE
+    // GAP service (ble_svc_gap_init) is only for peripheral devices that advertise
+    // We still have FULL GAP functionality for:
+    // - Scanning (ble_gap_disc)
+    // - Connecting (ble_gap_connect)
+    // - Security (ble_gap_security_initiate)
+    // All of these work WITHOUT the GAP Service
 
-    // Initialize bond storage callbacks
-    ESP_LOGI(TAG, "Setting up bond storage callbacks...");
+    // CRITICAL: Initialize bond storage BEFORE callbacks
+    // This was missing and is essential for pairing!
+    ESP_LOGI(TAG, "Initializing bond storage...");
+    ble_store_config_init();  // THIS IS CRITICAL!
+    ESP_LOGI(TAG, "Bond storage initialized");
+
+    // Set storage callbacks (these use the storage initialized above)
     ble_hs_cfg.store_read_cb = ble_store_config_read;
     ble_hs_cfg.store_write_cb = ble_store_config_write;
     ble_hs_cfg.store_delete_cb = ble_store_config_delete;

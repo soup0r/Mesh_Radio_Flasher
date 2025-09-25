@@ -8,6 +8,51 @@
 
 static const char *TAG = "BLE_CONN";
 
+// EXPLICIT SECURITY MANAGER AVAILABILITY CHECK
+static bool check_security_manager_available(void) {
+    static bool checked = false;
+    static bool available = false;
+
+    if (checked) return available;
+    checked = true;
+
+    ESP_LOGI(TAG, "=== SECURITY MANAGER AVAILABILITY CHECK ===");
+
+    #ifndef BLE_SM_IOACT_INPUT
+        ESP_LOGE(TAG, "❌ BLE_SM_IOACT_INPUT not available - Security Manager disabled");
+        available = false;
+    #endif
+
+    #ifndef MYNEWT_VAL_BLE_SM
+        ESP_LOGE(TAG, "❌ MYNEWT_VAL_BLE_SM not defined - Security Manager disabled");
+        available = false;
+    #endif
+
+    #if defined(BLE_SM_IOACT_INPUT) && defined(MYNEWT_VAL_BLE_SM)
+        ESP_LOGI(TAG, "✅ Security Manager functions available");
+        ESP_LOGI(TAG, "✅ BLE_SM_IOACT_INPUT: %d", BLE_SM_IOACT_INPUT);
+        ESP_LOGI(TAG, "✅ MYNEWT_VAL_BLE_SM: %d", MYNEWT_VAL_BLE_SM);
+        available = true;
+    #endif
+
+    ESP_LOGI(TAG, "=== Security Manager Available: %s ===", available ? "YES" : "NO");
+    return available;
+}
+
+// Add proper state tracking at the top of the file
+typedef enum {
+    CONN_STATE_IDLE = 0,
+    CONN_STATE_CONNECTING,
+    CONN_STATE_CONNECTED,
+    CONN_STATE_MTU_EXCHANGED,
+    CONN_STATE_SECURING,
+    CONN_STATE_PASSKEY_NEEDED,
+    CONN_STATE_PAIRING,
+    CONN_STATE_ENCRYPTED,
+    CONN_STATE_DISCOVERING,
+    CONN_STATE_READY
+} conn_state_t;
+
 // Connection state structure
 typedef struct {
     uint16_t conn_handle;
@@ -29,10 +74,9 @@ static uart_ctx_t uart = {
 
 // Proxy state management (simplified)
 static volatile proxy_state_t s_state = PROXY_IDLE;
-
-// Pairing status tracking (simplified - let NimBLE handle it naturally)
-// static bool pairing_in_progress = false;
-// static bool pairing_completed = false;
+static volatile conn_state_t conn_state = CONN_STATE_IDLE;
+static uint16_t pending_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+static bool passkey_injected = false;
 
 // Service and characteristic UUIDs
 static ble_uuid128_t UUID_NUS_SVC, UUID_NUS_TX, UUID_NUS_RX;
@@ -140,20 +184,28 @@ esp_err_t ble_proxy_connect(const uint8_t *addr) {
     uart = (uart_ctx_t){.conn_handle = BLE_HS_CONN_HANDLE_NONE};
     memcpy(current_conn.peer_addr, addr, 6);
 
-    // Connection parameters optimized for Meshtastic
+    // Connection parameters optimized for Meshtastic per NimBLE docs
     struct ble_gap_conn_params conn_params = {
-        .scan_itvl = 0x0010,
-        .scan_window = 0x0010,
-        .itvl_min = 24,     // 30ms (24 * 1.25ms)
-        .itvl_max = 40,     // 50ms (40 * 1.25ms)
-        .latency = 0,
-        .supervision_timeout = 256,  // 2.56 seconds
+        .scan_itvl = 0x0010,      // 16 * 0.625ms = 10ms
+        .scan_window = 0x0010,    // 16 * 0.625ms = 10ms
+        .itvl_min = 24,           // 24 * 1.25ms = 30ms (iOS compatible)
+        .itvl_max = 40,           // 40 * 1.25ms = 50ms
+        .latency = 0,             // No latency for responsiveness
+        .supervision_timeout = 400, // 400 * 10ms = 4 seconds
         .min_ce_len = 0,
         .max_ce_len = 0
     };
 
     rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &peer_addr, 30000, &conn_params,
                         ble_proxy_gap_connect_event, NULL);
+
+    if (rc == BLE_HS_EINVAL) {
+        // Try public address as fallback
+        ESP_LOGW(TAG, "Random address failed, trying public...");
+        peer_addr.type = BLE_ADDR_PUBLIC;
+        rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &peer_addr, 30000, &conn_params,
+                            ble_proxy_gap_connect_event, NULL);
+    }
 
     if (rc != 0) {
         ESP_LOGE(TAG, "Connection failed: %d", rc);
@@ -312,66 +364,110 @@ static int on_cccd_written(uint16_t ch, const struct ble_gatt_error *err, struct
     return 0;
 }
 
-// GAP event handler with proper pairing flow
+// Fix the GAP event handler
 static int ble_proxy_gap_connect_event(struct ble_gap_event *event, void *arg) {
-    // Check what value BLE_GAP_EVENT_PASSKEY_ACTION actually has
-    if (event->type == 3) {
-        ESP_LOGI(TAG, "🚨 Event 3 received - this should be PASSKEY_ACTION!");
-        ESP_LOGI(TAG, "Action type: %d", event->passkey.params.action);
-
-        // Handle it directly here since switch isn't working
-        struct ble_sm_io io = {0};
-
-        if (event->passkey.params.action == BLE_SM_IOACT_INPUT) {
-            io.action = BLE_SM_IOACT_INPUT;
-            io.passkey = 123456;
-            ESP_LOGI(TAG, "Injecting PIN 123456");
-        } else if (event->passkey.params.action == BLE_SM_IOACT_NUMCMP) {
-            io.action = BLE_SM_IOACT_NUMCMP;
-            io.numcmp_accept = 1;
-            ESP_LOGI(TAG, "Accepting numeric comparison");
-        } else if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
-            ESP_LOGI(TAG, "Display passkey action - using fixed passkey 123456");
-            io.action = BLE_SM_IOACT_DISP;
-            io.passkey = 123456;
-        }
-
-        int rc = ble_sm_inject_io(event->passkey.conn_handle, &io);
-        ESP_LOGI(TAG, "Passkey injection result: %d", rc);
-        return 0;
-    }
+    struct ble_gap_conn_desc desc;
+    int rc;
 
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
-            ESP_LOGI(TAG, "Connected, handle=%d", event->connect.conn_handle);
+            ESP_LOGI(TAG, "✅ Connected, handle=%d", event->connect.conn_handle);
             current_conn.conn_handle = event->connect.conn_handle;
             current_conn.state = BLE_STATE_CONNECTED;
+            conn_state = CONN_STATE_CONNECTED;
 
+            // Initialize UART context
             uart = (uart_ctx_t){0};
             uart.conn_handle = event->connect.conn_handle;
 
-            // Exchange MTU first
-            ble_gattc_exchange_mtu(uart.conn_handle, NULL, NULL);
+            // Store handle for passkey injection
+            pending_conn_handle = event->connect.conn_handle;
+            passkey_injected = false;
 
-            // Initiate security immediately after MTU exchange
-            ESP_LOGI(TAG, "Initiating security...");
-            int rc = ble_gap_security_initiate(event->connect.conn_handle);
-            ESP_LOGI(TAG, "Security initiate result: %d", rc);
+            // Exchange MTU first (important for Meshtastic)
+            ESP_LOGI(TAG, "📏 Exchanging MTU...");
+            ble_gattc_exchange_mtu(event->connect.conn_handle, NULL, NULL);
+            conn_state = CONN_STATE_MTU_EXCHANGED;
 
-            // DON'T start discovery yet - wait for encryption
+            // Wait before initiating security (critical for stability)
+            vTaskDelay(pdMS_TO_TICKS(1000));
+
+            // Now initiate security
+            conn_state = CONN_STATE_SECURING;
+            ESP_LOGI(TAG, "🔐 Initiating security...");
+            rc = ble_gap_security_initiate(event->connect.conn_handle);
+            if (rc != 0) {
+                ESP_LOGE(TAG, "Security initiate failed: %d", rc);
+                // Try to continue anyway
+            }
 
             if (connect_callback) {
                 connect_callback(current_conn.conn_handle, current_conn.peer_addr);
             }
         } else {
-            ESP_LOGE(TAG, "Connection failed: %d", event->connect.status);
+            ESP_LOGE(TAG, "Connection failed: status=%d", event->connect.status);
+            conn_state = CONN_STATE_IDLE;
             current_conn.state = BLE_STATE_IDLE;
             current_conn.conn_handle = BLE_HS_CONN_HANDLE_NONE;
-            s_state = PROXY_IDLE;
-            uart = (uart_ctx_t){.conn_handle = BLE_HS_CONN_HANDLE_NONE};
+            pending_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         }
         break;
+
+    case BLE_GAP_EVENT_PASSKEY_ACTION:
+        ESP_LOGI(TAG, "🔐 Passkey action: %d, conn_handle=%d",
+                event->passkey.params.action, event->passkey.conn_handle);
+
+        // CRITICAL: Check if Security Manager is available
+        if (!check_security_manager_available()) {
+            ESP_LOGE(TAG, "❌ Security Manager not available - cannot handle passkey");
+            return BLE_GAP_REPEAT_PAIRING_RETRY;
+        }
+
+        // Per document, inject immediately in the callback
+        struct ble_sm_io pkey = {0};  // Use pkey as in document
+        int rc = 0;
+        (void)pkey; // Suppress unused variable warning in some compiler paths
+
+        if (event->passkey.params.action == BLE_SM_IOACT_INPUT) {
+            ESP_LOGI(TAG, "📝 Device requesting PIN input...");
+
+            // Set up the passkey structure
+            pkey.action = BLE_SM_IOACT_INPUT;
+            pkey.passkey = 123456;  // Meshtastic default
+
+            // Inject immediately as document specifies
+            rc = ble_sm_inject_io(event->passkey.conn_handle, &pkey);
+            ESP_LOGI(TAG, "💉 Injected PIN 123456, result: %d (0=success)", rc);
+
+            if (rc == 0) {
+                ESP_LOGI(TAG, "✅ PIN injection successful!");
+                passkey_injected = true;
+            } else if (rc == 8) {
+                ESP_LOGE(TAG, "❌ Security Manager not available (error 8)");
+                // This shouldn't happen now with proper init
+            } else {
+                ESP_LOGE(TAG, "❌ PIN injection failed: %d", rc);
+                // Try manual entry via UI
+                if (passkey_callback) {
+                    passkey_callback(event->passkey.conn_handle, 0);
+                }
+            }
+        } else if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
+            // If we need to display (shouldn't happen with our config)
+            ESP_LOGI(TAG, "📺 Display passkey: %lu", event->passkey.params.numcmp);
+            pkey.action = BLE_SM_IOACT_DISP;
+            pkey.passkey = event->passkey.params.numcmp;
+            rc = ble_sm_inject_io(event->passkey.conn_handle, &pkey);
+        } else if (event->passkey.params.action == BLE_SM_IOACT_NUMCMP) {
+            // Numeric comparison
+            ESP_LOGI(TAG, "🔢 Numeric comparison: %lu", event->passkey.params.numcmp);
+            pkey.action = BLE_SM_IOACT_NUMCMP;
+            pkey.numcmp_accept = 1;  // Auto-accept
+            rc = ble_sm_inject_io(event->passkey.conn_handle, &pkey);
+            ESP_LOGI(TAG, "Numeric comparison result: %d", rc);
+        }
+        return 0;  // Important: return 0 from the event handler
 
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGW(TAG, "Disconnected: reason=%d", event->disconnect.reason);
@@ -382,54 +478,46 @@ static int ble_proxy_gap_connect_event(struct ble_gap_event *event, void *arg) {
         current_conn.state = BLE_STATE_IDLE;
         current_conn.conn_handle = BLE_HS_CONN_HANDLE_NONE;
         s_state = PROXY_IDLE;
+        conn_state = CONN_STATE_IDLE;
         uart = (uart_ctx_t){0};
-        break;
-
-    case BLE_GAP_EVENT_PASSKEY_ACTION:
-        ESP_LOGI(TAG, "🔐 Passkey action: %d", event->passkey.params.action);
-
-        struct ble_sm_io io = {0};
-
-        switch (event->passkey.params.action) {
-            case BLE_SM_IOACT_INPUT:
-                ESP_LOGI(TAG, "📝 Device requesting PIN input...");
-                io.action = BLE_SM_IOACT_INPUT;
-                io.passkey = 123456;
-                ESP_LOGI(TAG, "💉 Injecting PIN: 123456");
-                break;
-
-            case BLE_SM_IOACT_DISP:
-                ESP_LOGI(TAG, "📺 Display passkey action - using fixed passkey 123456");
-                io.action = BLE_SM_IOACT_DISP;
-                io.passkey = 123456;
-                break;
-
-            case BLE_SM_IOACT_NUMCMP:
-                ESP_LOGI(TAG, "🔢 Numeric comparison: %lu", event->passkey.params.numcmp);
-                io.action = BLE_SM_IOACT_NUMCMP;
-                io.numcmp_accept = 1;
-                break;
-
-            default:
-                ESP_LOGI(TAG, "❓ Unhandled passkey action: %d", event->passkey.params.action);
-                return 0;
-        }
-
-        int rc = ble_sm_inject_io(event->passkey.conn_handle, &io);
-        ESP_LOGI(TAG, "✅ Passkey injection result: %d (0=success)", rc);
         break;
 
     case BLE_GAP_EVENT_ENC_CHANGE:
         ESP_LOGI(TAG, "🔒 Encryption change: status=%d", event->enc_change.status);
         if (event->enc_change.status == 0) {
             uart.encrypted = true;
+            conn_state = CONN_STATE_ENCRYPTED;
             ESP_LOGI(TAG, "✅ Link encrypted successfully");
 
-            // Now that we're paired and encrypted, start service discovery
-            ESP_LOGI(TAG, "🔍 Starting service discovery after encryption...");
-            ble_gattc_disc_all_svcs(uart.conn_handle, on_disc_svc, NULL);
+            // Wait a bit for stability
+            vTaskDelay(pdMS_TO_TICKS(500));
+
+            // Start service discovery
+            conn_state = CONN_STATE_DISCOVERING;
+            ESP_LOGI(TAG, "🔍 Starting service discovery...");
+            rc = ble_gattc_disc_all_svcs(uart.conn_handle, on_disc_svc, NULL);
+            if (rc != 0) {
+                ESP_LOGE(TAG, "Service discovery failed to start: %d", rc);
+            }
         } else {
-            ESP_LOGW(TAG, "❌ Encryption failed: %d", event->enc_change.status);
+            ESP_LOGE(TAG, "❌ Encryption failed: %d (0x%02X)",
+                    event->enc_change.status, event->enc_change.status);
+
+            // Check if it's a known error
+            switch (event->enc_change.status) {
+                case BLE_SM_ERR_PASSKEY:
+                    ESP_LOGE(TAG, "Wrong passkey");
+                    break;
+                case BLE_SM_ERR_NUMCMP:
+                    ESP_LOGE(TAG, "Numeric comparison failed");
+                    break;
+                case BLE_SM_ERR_DHKEY:
+                    ESP_LOGE(TAG, "DHKEY check failed");
+                    break;
+                default:
+                    ESP_LOGE(TAG, "Unknown encryption error");
+                    break;
+            }
         }
         break;
 
@@ -441,7 +529,12 @@ static int ble_proxy_gap_connect_event(struct ble_gap_event *event, void *arg) {
         if (len > sizeof(buf)) len = sizeof(buf);
         os_mbuf_copydata(event->notify_rx.om, 0, len, buf);
 
-        ESP_LOGI(TAG, "BLE ← notify: %u bytes", len);
+        ESP_LOGI(TAG, "BLE ← notify: %u bytes from handle %d", len, event->notify_rx.attr_handle);
+
+        // Log first few bytes for debugging
+        ESP_LOG_BUFFER_HEX(TAG, buf, len < 16 ? len : 16);
+
+        // Forward to TCP
         tcp_forward_ble_data(buf, len);
 
         if (data_callback != NULL) {
@@ -450,30 +543,35 @@ static int ble_proxy_gap_connect_event(struct ble_gap_event *event, void *arg) {
         break;
     }
 
+    case BLE_GAP_EVENT_REPEAT_PAIRING:
+        ESP_LOGI(TAG, "🔄 Repeat pairing requested - deleting old bond");
+        rc = ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc);
+        if (rc == 0) {
+            ble_store_util_delete_peer(&desc.peer_id_addr);
+        }
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+
+    // Fix the typo - it's PARING not PAIRING in NimBLE headers
+    case BLE_GAP_EVENT_PARING_COMPLETE:  // Note: typo is in NimBLE itself!
+        ESP_LOGI(TAG, "🎉 Pairing complete! Status: %d", event->pairing_complete.status);
+        if (event->pairing_complete.status == 0) {
+            ESP_LOGI(TAG, "✅ Pairing successful - devices are now bonded");
+            conn_state = CONN_STATE_ENCRYPTED;
+        } else {
+            ESP_LOGE(TAG, "❌ Pairing failed with status: %d (0x%02X)",
+                    event->pairing_complete.status, event->pairing_complete.status);
+            conn_state = CONN_STATE_CONNECTED;
+        }
+        break;
+
     case BLE_GAP_EVENT_SUBSCRIBE:
         ESP_LOGI(TAG, "Subscribe event: cur_notify=%d, cur_indicate=%d",
                 event->subscribe.cur_notify, event->subscribe.cur_indicate);
         if (event->subscribe.cur_notify) {
             ESP_LOGI(TAG, "✅ Notifications successfully enabled!");
             s_state = PROXY_RUNNING;
+            conn_state = CONN_STATE_READY;
             start_tcp_proxy();
-        }
-        break;
-
-    case BLE_GAP_EVENT_REPEAT_PAIRING:
-        ESP_LOGI(TAG, "🔄 Repeat pairing requested - deleting old bond");
-        // Delete bond for current connection and retry pairing
-        struct ble_gap_conn_desc desc;
-        ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc);
-        ble_store_util_delete_peer(&desc.peer_id_addr);
-        return BLE_GAP_REPEAT_PAIRING_RETRY;
-
-    case BLE_GAP_EVENT_PARING_COMPLETE:
-        ESP_LOGI(TAG, "🎉 Pairing complete! Status: %d", event->pairing_complete.status);
-        if (event->pairing_complete.status == 0) {
-            ESP_LOGI(TAG, "✅ Pairing successful - devices are now bonded");
-        } else {
-            ESP_LOGE(TAG, "❌ Pairing failed with status: %d", event->pairing_complete.status);
         }
         break;
 
@@ -520,20 +618,25 @@ bool ble_proxy_is_connected(void) {
     return current_conn.state == BLE_STATE_CONNECTED;
 }
 
-// Input passkey
 esp_err_t ble_proxy_input_passkey(uint16_t conn_handle, uint32_t passkey) {
-    // Check if we're actually connected first
-    if (current_conn.state != BLE_STATE_CONNECTED) {
-        ESP_LOGE(TAG, "Cannot input passkey - not connected (state=%d)", current_conn.state);
+    // CRITICAL: Check if Security Manager is available
+    if (!check_security_manager_available()) {
+        ESP_LOGE(TAG, "❌ Security Manager not available - cannot input passkey");
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    // Validate connection state
+    if (conn_state < CONN_STATE_CONNECTED || conn_state > CONN_STATE_PAIRING) {
+        ESP_LOGE(TAG, "Cannot input passkey in state %d", conn_state);
         return ESP_ERR_INVALID_STATE;
     }
 
     if (conn_handle == 0) {
-        conn_handle = current_conn.conn_handle;
+        conn_handle = pending_conn_handle;
     }
 
     if (conn_handle == BLE_HS_CONN_HANDLE_NONE) {
-        ESP_LOGE(TAG, "No valid connection handle");
+        ESP_LOGE(TAG, "No valid connection handle for passkey");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -541,14 +644,16 @@ esp_err_t ble_proxy_input_passkey(uint16_t conn_handle, uint32_t passkey) {
         .action = BLE_SM_IOACT_INPUT,
         .passkey = passkey
     };
+    (void)io; // Suppress unused variable warning in some compiler paths
 
     int rc = ble_sm_inject_io(conn_handle, &io);
     if (rc != 0) {
-        ESP_LOGE(TAG, "Failed to inject passkey: %d", rc);
+        ESP_LOGE(TAG, "Failed to inject passkey: %d (0x%02X)", rc, rc);
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Passkey entered: %06lu", passkey);
+    ESP_LOGI(TAG, "✅ Passkey %06lu entered successfully", passkey);
+    passkey_injected = true;
     return ESP_OK;
 }
 
@@ -560,6 +665,12 @@ esp_err_t ble_proxy_set_passkey(uint32_t passkey) {
 
 // Confirm passkey (stub implementation)
 esp_err_t ble_proxy_confirm_passkey(uint16_t conn_handle, bool confirm) {
+    // CRITICAL: Check if Security Manager is available
+    if (!check_security_manager_available()) {
+        ESP_LOGE(TAG, "❌ Security Manager not available - cannot confirm passkey");
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
     if (conn_handle == BLE_HS_CONN_HANDLE_NONE) {
         conn_handle = current_conn.conn_handle;
     }
