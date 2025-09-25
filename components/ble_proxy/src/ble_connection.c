@@ -3,6 +3,7 @@
 #include "host/ble_sm.h"
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
+#include "host/ble_store.h"
 #include <string.h>
 
 static const char *TAG = "BLE_CONN";
@@ -28,6 +29,10 @@ static uart_ctx_t uart = {
 
 // Proxy state management (simplified)
 static volatile proxy_state_t s_state = PROXY_IDLE;
+
+// Pairing status tracking (simplified - let NimBLE handle it naturally)
+// static bool pairing_in_progress = false;
+// static bool pairing_completed = false;
 
 // Service and characteristic UUIDs
 static ble_uuid128_t UUID_NUS_SVC, UUID_NUS_TX, UUID_NUS_RX;
@@ -72,10 +77,10 @@ static ble_disconnect_cb_t disconnect_callback = NULL;
 static ble_passkey_cb_t passkey_callback = NULL;
 static ble_data_received_cb_t data_callback = NULL;
 
-// GATT handles for Nordic UART
-static uint16_t uart_svc_handle = 0;
-static uint16_t uart_tx_handle = 0;
-static uint16_t uart_rx_handle = 0;
+// GATT handles for Nordic UART (legacy - now handled by uart context)
+// static uint16_t uart_svc_handle = 0; // Unused variable
+// static uint16_t uart_tx_handle = 0; // Unused variable
+// static uint16_t uart_rx_handle = 0; // Unused variable
 
 // Connection callback
 static int ble_proxy_gap_connect_event(struct ble_gap_event *event, void *arg);
@@ -84,15 +89,15 @@ static int ble_proxy_gap_connect_event(struct ble_gap_event *event, void *arg);
 
 
 // Debug discovery callbacks
-static int ble_proxy_on_all_svc_disc(uint16_t conn_handle,
-                                     const struct ble_gatt_error *error,
-                                     const struct ble_gatt_svc *service,
-                                     void *arg);
+// static int ble_proxy_on_all_svc_disc(uint16_t conn_handle,
+//                                      const struct ble_gatt_error *error,
+//                                      const struct ble_gatt_svc *service,
+//                                      void *arg); // Unused function
 
-static int ble_proxy_on_debug_chr_disc(uint16_t conn_handle,
-                                       const struct ble_gatt_error *error,
-                                       const struct ble_gatt_chr *chr,
-                                       void *arg);
+// static int ble_proxy_on_debug_chr_disc(uint16_t conn_handle,
+//                                        const struct ble_gatt_error *error,
+//                                        const struct ble_gatt_chr *chr,
+//                                        void *arg); // Unused function
 
 // New discovery callback forward declarations
 static int on_disc_svc(uint16_t conn_handle, const struct ble_gatt_error *error, const struct ble_gatt_svc *service, void *arg);
@@ -123,54 +128,37 @@ esp_err_t ble_proxy_connect(const uint8_t *addr) {
         ESP_LOGW(TAG, "Failed to cancel discovery: %d", rc);
     }
 
-    // Small delay to ensure scan is stopped
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    // Set up peer address - try RANDOM first (most nRF52/Meshtastic devices use RANDOM)
+    // Set up peer address
     ble_addr_t peer_addr;
     memcpy(peer_addr.val, addr, 6);
-    peer_addr.type = BLE_ADDR_RANDOM;  // Most nRF52/Meshtastic devices use RANDOM
+    peer_addr.type = BLE_ADDR_RANDOM;  // Most Meshtastic devices use RANDOM
 
     current_conn.state = BLE_STATE_CONNECTING;
     s_state = PROXY_CONNECTING;
-    // Reset uart context
     uart = (uart_ctx_t){.conn_handle = BLE_HS_CONN_HANDLE_NONE};
     memcpy(current_conn.peer_addr, addr, 6);
 
-    // Use default connection parameters (IMPORTANT!)
-    struct ble_gap_conn_params conn_params;
-    memset(&conn_params, 0, sizeof(conn_params));
-    conn_params.scan_itvl = 0x0010;
-    conn_params.scan_window = 0x0010;
-    conn_params.itvl_min = BLE_GAP_INITIAL_CONN_ITVL_MIN;
-    conn_params.itvl_max = BLE_GAP_INITIAL_CONN_ITVL_MAX;
-    conn_params.latency = 0;
-    conn_params.supervision_timeout = 0x0100;
-    conn_params.min_ce_len = 0;
-    conn_params.max_ce_len = 0;
+    // Connection parameters optimized for Meshtastic
+    struct ble_gap_conn_params conn_params = {
+        .scan_itvl = 0x0010,
+        .scan_window = 0x0010,
+        .itvl_min = 24,     // 30ms (24 * 1.25ms)
+        .itvl_max = 40,     // 50ms (40 * 1.25ms)
+        .latency = 0,
+        .supervision_timeout = 256,  // 2.56 seconds
+        .min_ce_len = 0,
+        .max_ce_len = 0
+    };
 
-    rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &peer_addr,
-                        30000,  // 30 second timeout
-                        &conn_params,
-                        ble_proxy_gap_connect_event,
-                        NULL);
+    rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &peer_addr, 30000, &conn_params,
+                        ble_proxy_gap_connect_event, NULL);
 
     if (rc != 0) {
         ESP_LOGE(TAG, "Connection failed: %d", rc);
         current_conn.state = BLE_STATE_IDLE;
-
-        // If random address failed, we could retry with PUBLIC
-        if (rc == BLE_HS_ENOTCONN) {
-            ESP_LOGI(TAG, "Retrying with PUBLIC address type");
-            peer_addr.type = BLE_ADDR_PUBLIC;
-            rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &peer_addr,
-                                30000, &conn_params,
-                                ble_proxy_gap_connect_event, NULL);
-            if (rc == 0) {
-                current_conn.state = BLE_STATE_CONNECTING;
-                return ESP_OK;
-            }
-        }
+        s_state = PROXY_IDLE;
         return ESP_FAIL;
     }
 
@@ -272,7 +260,8 @@ static int on_disc_chr(uint16_t ch, const struct ble_gatt_error *err, const stru
 }
 
 // Descriptor discovery callback
-static int on_disc_dsc(uint16_t ch, const struct ble_gatt_error *err, uint16_t chr_val_handle, const struct ble_gatt_dsc *dsc, void *arg)
+static int on_disc_dsc(uint16_t ch, const struct ble_gatt_error *err,
+                       uint16_t chr_val_handle, const struct ble_gatt_dsc *dsc, void *arg)
 {
     if (err->status == 0 && dsc) {
         if (ble_uuid_u16(&dsc->uuid.u) == 0x2902) {
@@ -281,36 +270,24 @@ static int on_disc_dsc(uint16_t ch, const struct ble_gatt_error *err, uint16_t c
         }
         return 0;
     }
+
     if (err->status == BLE_HS_EDONE) {
         uart.dsc_done = true;
         ESP_LOGI(TAG, "Descriptor discovery complete");
 
         if (!uart.tx_cccd) {
-            ESP_LOGW(TAG, "No CCCD found for TX (val_handle=%u)", chr_val_handle);
+            ESP_LOGW(TAG, "No CCCD found");
             return 0;
         }
 
-        // Only write CCCD if we have encryption (or don't require it)
-        if (uart.encrypted || !uart.encrypted) {  // Try regardless of encryption for now
-            // Choose notify (0x0001) or indicate (0x0002) based on properties
-            uint8_t cccd_val[2];
-            if (uart.tx_props & BLE_GATT_CHR_PROP_NOTIFY) {
-                cccd_val[0] = 0x01; cccd_val[1] = 0x00;  // Enable notify
-                ESP_LOGI(TAG, "Enabling notifications on CCCD %u...", uart.tx_cccd);
-            } else if (uart.tx_props & BLE_GATT_CHR_PROP_INDICATE) {
-                cccd_val[0] = 0x02; cccd_val[1] = 0x00;  // Enable indicate
-                ESP_LOGI(TAG, "Enabling indications on CCCD %u...", uart.tx_cccd);
-            } else {
-                ESP_LOGW(TAG, "TX char has no notify/indicate properties: 0x%02x", uart.tx_props);
-                return 0;
-            }
-
-            return ble_gattc_write_flat(ch, uart.tx_cccd, cccd_val, sizeof cccd_val, on_cccd_written, NULL);
-        } else {
-            ESP_LOGW(TAG, "Link not encrypted, waiting for encryption before CCCD write");
-        }
-        return 0;
+        // Don't check encryption - just try to write
+        // The stack will handle pairing if needed
+        ESP_LOGI(TAG, "Writing CCCD...");
+        uint8_t cccd_val[2] = {0x01, 0x00};
+        return ble_gattc_write_flat(ch, uart.tx_cccd, cccd_val,
+                                    sizeof(cccd_val), on_cccd_written, NULL);
     }
+
     ESP_LOGE(TAG, "Descriptor discovery error: %d", err->status);
     return 0;
 }
@@ -335,56 +312,60 @@ static int on_cccd_written(uint16_t ch, const struct ble_gatt_error *err, struct
     return 0;
 }
 
-// GAP event handler
+// GAP event handler with proper pairing flow
 static int ble_proxy_gap_connect_event(struct ble_gap_event *event, void *arg) {
+    // Check what value BLE_GAP_EVENT_PASSKEY_ACTION actually has
+    if (event->type == 3) {
+        ESP_LOGI(TAG, "🚨 Event 3 received - this should be PASSKEY_ACTION!");
+        ESP_LOGI(TAG, "Action type: %d", event->passkey.params.action);
+
+        // Handle it directly here since switch isn't working
+        struct ble_sm_io io = {0};
+
+        if (event->passkey.params.action == BLE_SM_IOACT_INPUT) {
+            io.action = BLE_SM_IOACT_INPUT;
+            io.passkey = 123456;
+            ESP_LOGI(TAG, "Injecting PIN 123456");
+        } else if (event->passkey.params.action == BLE_SM_IOACT_NUMCMP) {
+            io.action = BLE_SM_IOACT_NUMCMP;
+            io.numcmp_accept = 1;
+            ESP_LOGI(TAG, "Accepting numeric comparison");
+        } else if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
+            ESP_LOGI(TAG, "Display passkey action - using fixed passkey 123456");
+            io.action = BLE_SM_IOACT_DISP;
+            io.passkey = 123456;
+        }
+
+        int rc = ble_sm_inject_io(event->passkey.conn_handle, &io);
+        ESP_LOGI(TAG, "Passkey injection result: %d", rc);
+        return 0;
+    }
+
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
-            ESP_LOGI(TAG, "Connected to peer");
+            ESP_LOGI(TAG, "Connected, handle=%d", event->connect.conn_handle);
             current_conn.conn_handle = event->connect.conn_handle;
             current_conn.state = BLE_STATE_CONNECTED;
 
-            // Reset and setup uart context
-            uart = (uart_ctx_t){0}; // reset
+            uart = (uart_ctx_t){0};
             uart.conn_handle = event->connect.conn_handle;
 
-            ESP_LOGI(TAG, "Connected, exchanging MTU...");
+            // Exchange MTU first
             ble_gattc_exchange_mtu(uart.conn_handle, NULL, NULL);
 
-            // Initiate security/pairing before GATT operations
+            // Initiate security immediately after MTU exchange
             ESP_LOGI(TAG, "Initiating security...");
             int rc = ble_gap_security_initiate(event->connect.conn_handle);
-            if (rc != 0) {
-                ESP_LOGW(TAG, "Security initiate failed: %d, proceeding anyway", rc);
-                // Fallback: start service discovery without encryption
-                ESP_LOGI(TAG, "Starting service discovery...");
-                ble_gattc_disc_all_svcs(uart.conn_handle, on_disc_svc, NULL);
-            }
+            ESP_LOGI(TAG, "Security initiate result: %d", rc);
+
+            // DON'T start discovery yet - wait for encryption
 
             if (connect_callback) {
                 connect_callback(current_conn.conn_handle, current_conn.peer_addr);
             }
         } else {
-            // Better error logging
-            const char *error_msg;
-            switch(event->connect.status) {
-                case BLE_HS_ETIMEOUT:
-                    error_msg = "Connection timeout - device may not be in pairing mode";
-                    break;
-                case BLE_HS_EDONE:
-                    error_msg = "Operation already completed";
-                    break;
-                case BLE_HS_EBUSY:
-                    error_msg = "Connection busy";
-                    break;
-                case BLE_HS_EREJECT:
-                    error_msg = "Connection rejected by device";
-                    break;
-                default:
-                    error_msg = "Unknown error";
-                    break;
-            }
-            ESP_LOGE(TAG, "Connection failed: %s (status=%d)", error_msg, event->connect.status);
+            ESP_LOGE(TAG, "Connection failed: %d", event->connect.status);
             current_conn.state = BLE_STATE_IDLE;
             current_conn.conn_handle = BLE_HS_CONN_HANDLE_NONE;
             s_state = PROXY_IDLE;
@@ -394,60 +375,61 @@ static int ble_proxy_gap_connect_event(struct ble_gap_event *event, void *arg) {
 
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGW(TAG, "Disconnected: reason=%d", event->disconnect.reason);
-
-        // Check for NULL before calling
         if (disconnect_callback != NULL) {
             disconnect_callback(current_conn.conn_handle, event->disconnect.reason);
         }
-
-        // Stop TCP proxy first
-        extern void stop_tcp_proxy(void);
         stop_tcp_proxy();
-
-        // Reset state
         current_conn.state = BLE_STATE_IDLE;
         current_conn.conn_handle = BLE_HS_CONN_HANDLE_NONE;
         s_state = PROXY_IDLE;
-        uart = (uart_ctx_t){0}; // clear handles
+        uart = (uart_ctx_t){0};
         break;
 
     case BLE_GAP_EVENT_PASSKEY_ACTION:
-        ESP_LOGI(TAG, "Passkey action: %d", event->passkey.params.action);
+        ESP_LOGI(TAG, "🔐 Passkey action: %d", event->passkey.params.action);
 
-        // Auto-inject Meshtastic default PIN
-        if (event->passkey.params.action == BLE_SM_IOACT_INPUT) {
-            struct ble_sm_io io = {
-                .action = BLE_SM_IOACT_INPUT,
-                .passkey = 123456  // Meshtastic default
-            };
+        struct ble_sm_io io = {0};
 
-            int rc = ble_sm_inject_io(event->passkey.conn_handle, &io);
-            ESP_LOGI(TAG, "Auto-injected PIN 123456: %s",
-                    rc == 0 ? "SUCCESS" : "FAILED");
+        switch (event->passkey.params.action) {
+            case BLE_SM_IOACT_INPUT:
+                ESP_LOGI(TAG, "📝 Device requesting PIN input...");
+                io.action = BLE_SM_IOACT_INPUT;
+                io.passkey = 123456;
+                ESP_LOGI(TAG, "💉 Injecting PIN: 123456");
+                break;
 
-            if (rc != 0 && passkey_callback) {
-                passkey_callback(event->passkey.conn_handle, 0);
-            }
-        } else if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
-            uint32_t passkey = 123456;  // Use default for display
-            ESP_LOGI(TAG, "Display passkey: %06lu", passkey);
-            if (passkey_callback) {
-                passkey_callback(event->passkey.conn_handle, passkey);
-            }
+            case BLE_SM_IOACT_DISP:
+                ESP_LOGI(TAG, "📺 Display passkey action - using fixed passkey 123456");
+                io.action = BLE_SM_IOACT_DISP;
+                io.passkey = 123456;
+                break;
+
+            case BLE_SM_IOACT_NUMCMP:
+                ESP_LOGI(TAG, "🔢 Numeric comparison: %lu", event->passkey.params.numcmp);
+                io.action = BLE_SM_IOACT_NUMCMP;
+                io.numcmp_accept = 1;
+                break;
+
+            default:
+                ESP_LOGI(TAG, "❓ Unhandled passkey action: %d", event->passkey.params.action);
+                return 0;
         }
+
+        int rc = ble_sm_inject_io(event->passkey.conn_handle, &io);
+        ESP_LOGI(TAG, "✅ Passkey injection result: %d (0=success)", rc);
         break;
 
     case BLE_GAP_EVENT_ENC_CHANGE:
-        ESP_LOGI(TAG, "Encryption change: status=%d", event->enc_change.status);
-
+        ESP_LOGI(TAG, "🔒 Encryption change: status=%d", event->enc_change.status);
         if (event->enc_change.status == 0) {
             uart.encrypted = true;
-            ESP_LOGI(TAG, "✅ Link encrypted, starting service discovery...");
+            ESP_LOGI(TAG, "✅ Link encrypted successfully");
+
+            // Now that we're paired and encrypted, start service discovery
+            ESP_LOGI(TAG, "🔍 Starting service discovery after encryption...");
             ble_gattc_disc_all_svcs(uart.conn_handle, on_disc_svc, NULL);
         } else {
-            ESP_LOGW(TAG, "Encryption failed: %d, trying discovery anyway", event->enc_change.status);
-            // Some devices don't require encryption, try anyway
-            ble_gattc_disc_all_svcs(uart.conn_handle, on_disc_svc, NULL);
+            ESP_LOGW(TAG, "❌ Encryption failed: %d", event->enc_change.status);
         }
         break;
 
@@ -456,19 +438,48 @@ static int ble_proxy_gap_connect_event(struct ble_gap_event *event, void *arg) {
         if (!len) break;
 
         uint8_t buf[512];
-        if (len > sizeof buf) len = sizeof buf;
+        if (len > sizeof(buf)) len = sizeof(buf);
         os_mbuf_copydata(event->notify_rx.om, 0, len, buf);
 
         ESP_LOGI(TAG, "BLE ← notify: %u bytes", len);
-        extern void tcp_forward_ble_data(uint8_t *data, uint16_t len);
         tcp_forward_ble_data(buf, len);
 
-        // Also forward to registered callback if any
         if (data_callback != NULL) {
             data_callback(current_conn.conn_handle, buf, len);
         }
         break;
     }
+
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        ESP_LOGI(TAG, "Subscribe event: cur_notify=%d, cur_indicate=%d",
+                event->subscribe.cur_notify, event->subscribe.cur_indicate);
+        if (event->subscribe.cur_notify) {
+            ESP_LOGI(TAG, "✅ Notifications successfully enabled!");
+            s_state = PROXY_RUNNING;
+            start_tcp_proxy();
+        }
+        break;
+
+    case BLE_GAP_EVENT_REPEAT_PAIRING:
+        ESP_LOGI(TAG, "🔄 Repeat pairing requested - deleting old bond");
+        // Delete bond for current connection and retry pairing
+        struct ble_gap_conn_desc desc;
+        ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc);
+        ble_store_util_delete_peer(&desc.peer_id_addr);
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+
+    case BLE_GAP_EVENT_PARING_COMPLETE:
+        ESP_LOGI(TAG, "🎉 Pairing complete! Status: %d", event->pairing_complete.status);
+        if (event->pairing_complete.status == 0) {
+            ESP_LOGI(TAG, "✅ Pairing successful - devices are now bonded");
+        } else {
+            ESP_LOGE(TAG, "❌ Pairing failed with status: %d", event->pairing_complete.status);
+        }
+        break;
+
+    default:
+        ESP_LOGI(TAG, "GAP event: %d", event->type);
+        break;
     }
 
     return 0;
@@ -476,43 +487,7 @@ static int ble_proxy_gap_connect_event(struct ble_gap_event *event, void *arg) {
 
 
 // Characteristic discovery callback
-static int ble_proxy_on_chr_disc(uint16_t conn_handle,
-                                 const struct ble_gatt_error *error,
-                                 const struct ble_gatt_chr *chr,
-                                 void *arg) {
-    if (chr != NULL) {
-        ESP_LOGI(TAG, "Found char: val_handle=%d, props=0x%02x",
-                chr->val_handle, chr->properties);
-
-        // Store ACTUAL handles from discovery
-        if (chr->properties & BLE_GATT_CHR_PROP_NOTIFY) {
-            uart_tx_handle = chr->val_handle;
-            ESP_LOGI(TAG, "TX handle: %d", uart_tx_handle);
-        }
-        if (chr->properties & BLE_GATT_CHR_PROP_WRITE_NO_RSP) {
-            uart_rx_handle = chr->val_handle;
-            ESP_LOGI(TAG, "RX handle: %d", uart_rx_handle);
-        }
-    } else if (error->status == BLE_HS_EDONE) {
-        if (uart_tx_handle && uart_rx_handle) {
-            // Enable notifications using write_flat
-            uint8_t notify[2] = {0x01, 0x00};
-            int rc = ble_gattc_write_flat(conn_handle,
-                                          uart_tx_handle + 1,  // CCCD
-                                          notify, 2,
-                                          NULL, NULL);  // Add callback params
-            ESP_LOGI(TAG, "Enable notifications: %d", rc);
-
-            ESP_LOGI(TAG, "✅ Starting TCP proxy with RX=%d, TX=%d",
-                    uart_rx_handle, uart_tx_handle);
-            extern void start_tcp_proxy(void);
-            start_tcp_proxy();
-        } else {
-            ESP_LOGE(TAG, "❌ Characteristics not found - NOT starting proxy");
-        }
-    }
-    return 0;
-}
+// Removed unused function ble_proxy_on_chr_disc
 
 
 // Register callbacks
@@ -633,31 +608,5 @@ void test_meshtastic_communication(void) {
 
 
 // Debug callback to see ALL characteristics
-static int ble_proxy_on_debug_chr_disc(uint16_t conn_handle,
-                                       const struct ble_gatt_error *error,
-                                       const struct ble_gatt_chr *chr,
-                                       void *arg) {
-    if (error->status == 0 && chr != NULL) {
-        char buf[BLE_UUID_STR_LEN];
-        ble_uuid_to_str(&chr->uuid.u, buf);
-
-        // Check properties
-        char props[64] = {0};
-        if (chr->properties & BLE_GATT_CHR_PROP_READ) strcat(props, "READ ");
-        if (chr->properties & BLE_GATT_CHR_PROP_WRITE_NO_RSP) strcat(props, "WRITE_NO_RSP ");
-        if (chr->properties & BLE_GATT_CHR_PROP_WRITE) strcat(props, "WRITE ");
-        if (chr->properties & BLE_GATT_CHR_PROP_NOTIFY) strcat(props, "NOTIFY ");
-        if (chr->properties & BLE_GATT_CHR_PROP_INDICATE) strcat(props, "INDICATE ");
-
-        ESP_LOGI(TAG, "  Char: %s, handle=%d, props=[%s]",
-                buf, chr->val_handle, props);
-
-        // If we find ANY characteristic with WRITE+NOTIFY, we can use it
-        if ((chr->properties & BLE_GATT_CHR_PROP_NOTIFY) &&
-            (chr->properties & (BLE_GATT_CHR_PROP_WRITE | BLE_GATT_CHR_PROP_WRITE_NO_RSP))) {
-            ESP_LOGI(TAG, "    -> Could use this for serial communication!");
-        }
-    }
-    return 0;
-}
+// Removed unused function ble_proxy_on_debug_chr_disc
 

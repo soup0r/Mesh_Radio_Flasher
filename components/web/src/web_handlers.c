@@ -2,6 +2,7 @@
 #include "esp_log.h"
 #include "power_mgmt.h"
 #include "cJSON.h"
+#include "host/ble_store.h"
 
 static const char *TAG = "WEB_HANDLERS";
 
@@ -165,6 +166,16 @@ static esp_err_t power_cycle_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// Clear BLE bonds handler
+static esp_err_t clear_bonds_handler(httpd_req_t *req) {
+    ESP_LOGI(TAG, "Clearing all BLE bonds...");
+    ble_store_clear();
+    const char* resp = "{\"success\":true,\"message\":\"All BLE bonds cleared\"}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, resp, strlen(resp));
+    return ESP_OK;
+}
+
 esp_err_t register_power_handlers(httpd_handle_t server) {
     httpd_uri_t power_status_uri = {
         .uri = "/power_status",
@@ -207,7 +218,16 @@ esp_err_t register_power_handlers(httpd_handle_t server) {
         .handler = battery_status_handler,
         .user_ctx = NULL
     };
+
+    httpd_uri_t clear_bonds_uri = {
+        .uri = "/clear_bonds",
+        .method = HTTP_POST,
+        .handler = clear_bonds_handler,
+        .user_ctx = NULL
+    };
+
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &battery_status_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &clear_bonds_uri));
 
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &power_status_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &power_on_uri));

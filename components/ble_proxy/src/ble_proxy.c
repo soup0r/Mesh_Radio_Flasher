@@ -10,6 +10,7 @@
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "host/ble_store.h"
+#include "store/config/ble_store_config.h"
 #include <string.h>
 
 static const char *TAG = "BLE_PROXY";
@@ -233,21 +234,30 @@ esp_err_t ble_proxy_init(void) {
     ESP_LOGI(TAG, "Configuring NimBLE host...");
     ble_hs_cfg.reset_cb = ble_app_on_reset;
     ble_hs_cfg.sync_cb = ble_app_on_sync;
+    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;  // Add this
 
-    // Enable Security Manager (SM) for pairing/encryption
-    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;  // No input/output capability
-    ble_hs_cfg.sm_bonding = 1;                   // Enable bonding
-    ble_hs_cfg.sm_mitm = 0;                      // No MITM protection (no PIN display/input)
-    ble_hs_cfg.sm_sc = 1;                        // Enable LE Secure Connections
+    // Fixed security for Meshtastic
+    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_KEYBOARD_ONLY;  // We input the PIN
+    ble_hs_cfg.sm_bonding = 1;                           // Enable bonding
+    ble_hs_cfg.sm_mitm = 1;                             // MITM required
+    ble_hs_cfg.sm_sc = 1;                               // Support LESC
+    ble_hs_cfg.sm_sc_only = 0;                          // IMPORTANT: Allow legacy fallback!
     ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
 
-    ESP_LOGI(TAG, "NimBLE host configured with Security Manager");
+    ESP_LOGI(TAG, "NimBLE configured for simplified pairing");
 
     // Initialize GAP service
     ESP_LOGI(TAG, "Initializing GAP service...");
     ble_svc_gap_init();
     ESP_LOGI(TAG, "GAP service initialized");
+
+    // Initialize bond storage callbacks
+    ESP_LOGI(TAG, "Setting up bond storage callbacks...");
+    ble_hs_cfg.store_read_cb = ble_store_config_read;
+    ble_hs_cfg.store_write_cb = ble_store_config_write;
+    ble_hs_cfg.store_delete_cb = ble_store_config_delete;
+    ESP_LOGI(TAG, "Bond storage callbacks configured");
 
     // Initialize device tracking
     ESP_LOGI(TAG, "Initializing device tracking...");
@@ -264,7 +274,7 @@ esp_err_t ble_proxy_init(void) {
     vTaskDelay(pdMS_TO_TICKS(200));
 
     ble_initialized = true;
-    ESP_LOGI(TAG, "✅ BLE proxy initialized successfully");
+    ESP_LOGI(TAG, "✅ BLE proxy initialized successfully with ccache");
     ESP_LOGI(TAG, "Free heap after BLE init: %d bytes", esp_get_free_heap_size());
 
     return ESP_OK;
